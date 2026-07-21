@@ -4,7 +4,11 @@ function loadProgress(filePath) {
   if (!fs.existsSync(filePath)) {
     return { lessonIndex: 0, sectionIndex: 0 };
   }
-  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch {
+    return { lessonIndex: 0, sectionIndex: 0 };
+  }
 }
 
 function saveProgress(filePath, progress) {
