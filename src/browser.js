@@ -26,4 +26,18 @@ async function waitForLogin(driver, { pollMs, timeoutMs, postLoginSelector }) {
   throw new Error('Timed out waiting for manual login');
 }
 
-module.exports = { createDriver, waitForLogin, By, until };
+async function getCurrentQuestionDom(driver) {
+  const outerHTML = await driver.executeScript('return document.documentElement.outerHTML');
+  return { outerHTML, driver };
+}
+
+async function goToNextQuestion(driver) {
+  return driver.executeScript(`
+    const buttons = Array.from(document.querySelectorAll('button'));
+    const btn = buttons.find((b) => b.textContent.trim() === 'Next');
+    if (btn) { btn.click(); return true; }
+    return false;
+  `);
+}
+
+module.exports = { createDriver, waitForLogin, getCurrentQuestionDom, goToNextQuestion, By, until };
