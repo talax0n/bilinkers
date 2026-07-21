@@ -36,3 +36,23 @@ test('answerQuestion sends model and json response_format', async () => {
   assert.equal(client.calls[0].model, 'my-model');
   assert.deepEqual(client.calls[0].response_format, { type: 'json_object' });
 });
+
+test('answerQuestion throws a clear error when LLM response is not valid JSON', async () => {
+  const client = {
+    chat: { completions: { create: async () => ({ choices: [{ message: { content: 'not json' } }] }) } },
+  };
+  await assert.rejects(
+    () => answerQuestion(client, 'gpt-4o', 'instr', { text: 'q' }),
+    /LLM response was not valid JSON/
+  );
+});
+
+test('answerQuestion throws a clear error when LLM response has no content', async () => {
+  const client = {
+    chat: { completions: { create: async () => ({ choices: [] }) } },
+  };
+  await assert.rejects(
+    () => answerQuestion(client, 'gpt-4o', 'instr', { text: 'q' }),
+    /LLM response had no message content/
+  );
+});

@@ -20,7 +20,15 @@ async function answerQuestion(client, model, instruction, questionData, feedback
     response_format: { type: 'json_object' },
   });
 
-  return JSON.parse(response.choices[0].message.content);
+  const content = response.choices?.[0]?.message?.content;
+  if (!content) {
+    throw new Error('answerQuestion: LLM response had no message content');
+  }
+  try {
+    return JSON.parse(content);
+  } catch (err) {
+    throw new Error(`answerQuestion: LLM response was not valid JSON: ${err.message}`);
+  }
 }
 
 module.exports = { createClient, answerQuestion };
