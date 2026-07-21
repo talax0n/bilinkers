@@ -30,11 +30,23 @@ test('answerQuestion includes feedback in the prompt when retrying', async () =>
   assert.match(userMessage.content, /previous answer was wrong/);
 });
 
-test('answerQuestion sends model and json response_format', async () => {
+test('answerQuestion sends model and no response_format (unsupported by some providers)', async () => {
   const client = makeFakeClient({ answer: 'x' });
   await answerQuestion(client, 'my-model', 'instr', { text: 'q' });
   assert.equal(client.calls[0].model, 'my-model');
-  assert.deepEqual(client.calls[0].response_format, { type: 'json_object' });
+  assert.equal(client.calls[0].response_format, undefined);
+});
+
+test('answerQuestion strips a ```json fence before parsing', async () => {
+  const client = {
+    chat: {
+      completions: {
+        create: async () => ({ choices: [{ message: { content: '```json\n{"answer":"went"}\n```' } }] }),
+      },
+    },
+  };
+  const result = await answerQuestion(client, 'gpt-4o', 'instr', { text: 'q' });
+  assert.deepEqual(result, { answer: 'went' });
 });
 
 test('answerQuestion throws a clear error when LLM response is not valid JSON', async () => {

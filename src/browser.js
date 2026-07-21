@@ -27,11 +27,19 @@ async function waitForLogin(driver, { pollMs, timeoutMs, postLoginSelector }) {
 }
 
 async function getCurrentQuestionDom(driver) {
+  await driver.switchTo().defaultContent();
+
+  const iframes = await driver.findElements(By.css('iframe'));
+  if (iframes.length > 0) {
+    await driver.switchTo().frame(iframes[0]);
+  }
+
   const outerHTML = await driver.executeScript('return document.documentElement.outerHTML');
-  return { outerHTML, driver };
+  return { outerHTML, driver, insideIframe: iframes.length > 0 };
 }
 
 async function goToNextQuestion(driver) {
+  await driver.switchTo().defaultContent();
   return driver.executeScript(`
     const buttons = Array.from(document.querySelectorAll('button'));
     const btn = buttons.find((b) => b.textContent.trim() === 'Next');

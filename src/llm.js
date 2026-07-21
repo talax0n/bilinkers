@@ -17,15 +17,19 @@ async function answerQuestion(client, model, instruction, questionData, feedback
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
     ],
-    response_format: { type: 'json_object' },
   });
 
   const content = response.choices?.[0]?.message?.content;
   if (!content) {
     throw new Error('answerQuestion: LLM response had no message content');
   }
+  // Some providers don't support response_format: json_object (one observed
+  // provider returns a 502 for the whole request when it's set), so JSON is
+  // enforced via the system prompt only — models occasionally wrap the
+  // reply in a ```json fence anyway, so strip that before parsing.
+  const unfenced = content.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
   try {
-    return JSON.parse(content);
+    return JSON.parse(unfenced);
   } catch (err) {
     throw new Error(`answerQuestion: LLM response was not valid JSON: ${err.message}`);
   }
