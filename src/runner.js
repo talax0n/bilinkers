@@ -21,9 +21,19 @@ async function processQuestion({
   let outcome = 'incorrect';
 
   while (attempts <= retryLimit) {
-    const llmResult = await answerQuestionFn(llmClient, model, instruction, questionData, feedback);
-    await handler.answer(driver, llmResult);
-    outcome = await handler.checkResult(dom);
+    try {
+      const llmResult = await answerQuestionFn(llmClient, model, instruction, questionData, feedback);
+      await handler.answer(driver, llmResult);
+      outcome = await handler.checkResult(dom);
+      if (outcome !== 'correct' && outcome !== 'incorrect') {
+        throw new Error(`handler.checkResult returned unexpected value: ${outcome}`);
+      }
+    } catch (err) {
+      outcome = 'incorrect';
+      feedback = `previous attempt failed with an error: ${err.message}`;
+      attempts += 1;
+      continue;
+    }
     attempts += 1;
     if (outcome === 'correct') break;
     feedback = 'previous answer was wrong, try again';

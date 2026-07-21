@@ -76,3 +76,55 @@ test('processQuestion retries once with feedback then gives up', async () => {
   assert.deepEqual(result, { status: 'incorrect', attempts: 2 });
   assert.deepEqual(feedbacks, [null, 'previous answer was wrong, try again']);
 });
+
+test('processQuestion treats a throwing handler as incorrect and still respects retryLimit', async () => {
+  const registry = createRegistry();
+  registry.register({
+    name: 'mcq',
+    detect: () => true,
+    parse: () => ({ text: 'q' }),
+    answer: async () => { throw new Error('stale element'); },
+    checkResult: async () => 'correct',
+  });
+
+  const answerQuestionFn = async () => ({ answer: 'A' });
+
+  const result = await processQuestion({
+    driver: {},
+    dom: {},
+    registry,
+    llmClient: {},
+    model: 'gpt-4o',
+    instruction: 'instr',
+    retryLimit: 1,
+    answerQuestionFn,
+  });
+
+  assert.deepEqual(result, { status: 'incorrect', attempts: 2 });
+});
+
+test('processQuestion treats an unexpected checkResult value as incorrect', async () => {
+  const registry = createRegistry();
+  registry.register({
+    name: 'mcq',
+    detect: () => true,
+    parse: () => ({ text: 'q' }),
+    answer: async () => {},
+    checkResult: async () => 'not-a-real-status',
+  });
+
+  const answerQuestionFn = async () => ({ answer: 'A' });
+
+  const result = await processQuestion({
+    driver: {},
+    dom: {},
+    registry,
+    llmClient: {},
+    model: 'gpt-4o',
+    instruction: 'instr',
+    retryLimit: 0,
+    answerQuestionFn,
+  });
+
+  assert.deepEqual(result, { status: 'incorrect', attempts: 1 });
+});
