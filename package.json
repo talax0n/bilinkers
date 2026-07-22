@@ -10,7 +10,8 @@
     "bot": "bun scripts/cli.js",
     "exercise": "bun scripts/cli.js exercise",
     "iframe": "bun scripts/cli.js iframe",
-    "unit": "bun scripts/cli.js unit"
+    "unit": "bun scripts/cli.js unit",
+    "checkpoint": "bun scripts/cli.js checkpoint"
   },
   "engines": {
     "bun": ">=1.3.0"

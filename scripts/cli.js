@@ -9,7 +9,7 @@ const logger = require('../src/logger');
 
 // One-command entry point: launches your Chromium-based browser with remote
 // debugging on, waits for you to log in and open the exercise, then runs the
-// matching bot script. Usage: node scripts/cli.js [exercise|iframe|unit] [url]
+// matching bot script. Usage: node scripts/cli.js [exercise|iframe|unit|checkpoint] [url]
 // Mode is optional — if omitted, it's auto-detected from the page after you
 // press Enter (the native MUI exercise, an LTI-embedded iframe activity, and
 // a unit's own activity list all have distinct, unambiguous DOM markers), so
@@ -34,6 +34,7 @@ const MODES = {
   exercise: '../scripts/run-exercise.js',
   unit: '../scripts/run-unit.js',
   iframe: '../scripts/run-iframe-exercise.js',
+  checkpoint: '../scripts/run-checkpoint.js',
 };
 
 function resolveBinaryPath() {
@@ -122,6 +123,25 @@ async function detectMode() {
     }
 
     const topHtml = await driver.executeScript('return document.documentElement.outerHTML');
+
+    // A checkpoint's gate page ("ENG-B1.2 - INDEPENDENT (V2) - Checkpoint 1",
+    // Total Question/Passing Score/Maximum Attempt, a "Start Attempt N" or
+    // "Continue" button) has the exact same shape as a plain exercise's
+    // BlExercise gate — "Checkpoint" in the heading is the one thing that
+    // tells them apart, so that's the check, not the generic gate markers.
+    const isCheckpointGate = await driver.executeScript(`
+      const hasCheckpointHeading = /Checkpoint/i.test(document.body.textContent);
+      const buttons = Array.from(document.querySelectorAll('button'));
+      const hasGateButton = buttons.some((b) => {
+        const text = b.textContent.trim();
+        return text.startsWith('Start Attempt') || text === 'Continue';
+      });
+      return hasCheckpointHeading && hasGateButton;
+    `);
+    if (isCheckpointGate) {
+      return 'checkpoint';
+    }
+
     if (topHtml.includes('bl-w-full justify-content-start')) {
       return 'exercise';
     }

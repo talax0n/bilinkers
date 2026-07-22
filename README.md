@@ -1,6 +1,6 @@
 # Beelingua Auto-Bot
 
-A browser-driven bot that completes the Beelingua English course automatically. It reads each question straight out of the page DOM, asks an LLM (any OpenAI-compatible provider, or Gemini) for the answer, and drives Selenium to submit it — retrying in place (up to 10 times, feeding the wrong-answer feedback, plus a running list of already-ruled-out answers, back to the LLM each try) before giving up on that question. It can also drive a whole unit's activity list end to end (`npm run unit`), opening and finishing each unfinished exercise in turn.
+A browser-driven bot that completes the Beelingua English course automatically. It reads each question straight out of the page DOM, asks an LLM (any OpenAI-compatible provider, or Gemini) for the answer, and drives Selenium to submit it — retrying in place (up to 10 times, feeding the wrong-answer feedback, plus a running list of already-ruled-out answers, back to the LLM each try) before giving up on that question. It can also drive a whole unit's activity list end to end (`npm run unit`), opening and finishing each unfinished exercise in turn, or a checkpoint quiz between units (`npm run checkpoint`), retrying the whole attempt until it passes.
 
 > [!IMPORTANT]
 > This project is for personal/educational automation of your own coursework. You are responsible for complying with your institution's academic integrity policies before using it.
@@ -99,21 +99,23 @@ Don't know if yours matches? Find it yourself:
 
 ```bash
 # Auto-detects which one you need after you open the page — no need to know
-# upfront whether it's the native app, an LTI-embedded activity, or a unit's
-# own activity list
+# upfront whether it's the native app, an LTI-embedded activity, a unit's
+# own activity list, or a checkpoint gate
 npm run bot
 
 # Or force a specific one:
-npm run exercise   # native MUI-based exercises (reading comprehension, audio multiple choice)
-npm run iframe     # LTI-embedded activities (fill-in-blank, error analysis, vocab slides, matching)
-npm run unit       # a unit's activity list — runs every unfinished row in turn
+npm run exercise    # native MUI-based exercises (reading comprehension, audio multiple choice)
+npm run iframe      # LTI-embedded activities (fill-in-blank, error analysis, vocab slides, matching)
+npm run unit        # a unit's activity list — runs every unfinished row in turn
+npm run checkpoint  # a checkpoint quiz (30 questions, passing score 100) — retries the whole attempt until it passes
 ```
 
 It opens the browser at `https://lms.binus.ac.id` by default (pass a different URL as an extra arg: `npm run bot -- https://example.com`), prompts `Log in and open the exercise, then press Enter to start the bot...`, and once you hit Enter:
 
-- With `npm run bot`, it inspects the current tab's DOM — an iframe present means the LTI activity; failing that, the narrow `bl-w-full justify-content-start` class (the actual lettered option buttons) means a native exercise; failing that, two or more titled `button.bl-w-full` rows means a unit's activity list — and picks the matching runner automatically, logging which one it detected. (Generic `MuiButtonBase`/`.bl-w-full` alone isn't a reliable signal on its own — this app's header, nav, and every row list use those same classes on every page.)
+- With `npm run bot`, it inspects the current tab's DOM — an iframe present means the LTI activity; failing that, a "Checkpoint" heading plus a Start Attempt/Continue button means a checkpoint gate; failing that, the narrow `bl-w-full justify-content-start` class (the actual lettered option buttons) means a native exercise; failing that, two or more titled `button.bl-w-full` rows means a unit's activity list — and picks the matching runner automatically, logging which one it detected. (Generic `MuiButtonBase`/`.bl-w-full` alone isn't a reliable signal on its own — this app's header, nav, and every row list use those same classes on every page. A checkpoint gate also shares its `Total Question`/`Passing Score`/`Maximum Attempt` shape with a plain exercise's own gate screen, so the "Checkpoint" wording is what actually tells them apart.)
 - Either way, it then runs the loop described above: answers each question in place, checks the result, retries in place on a wrong answer, and advances until the exercise ends, a question stays wrong after all retries, or an unhandled question type is hit. Native exercises that sit behind a "Total Question / Passing Score / Start" gate screen, or that finish with a Submit → confirm → result-screen "Next" step instead of a plain per-question "Next" button, are driven through that too.
 - `npm run unit` is a level up from the other two: it reads the unit's own row list (skipping anything already checkmarked or still locked), opens the next unfinished row, runs `exercise` or `iframe` against it on the *same* browser session, returns to the list, and repeats until nothing unfinished is left or something can't be auto-solved (in which case it stops there rather than guessing past it, same philosophy as the unhandled-question-type case above).
+- `npm run checkpoint` drives a checkpoint quiz — a bigger (e.g. 30-question), single native exercise sitting behind its own "Start Attempt N"/"Continue" gate, requiring a passing score of 100 with unlimited attempts. It reuses the same native-exercise question loop as `exercise`, and since the platform allows unlimited attempts, automatically retries the whole checkpoint from the gate if a completed attempt scores under 100 — capped at 5 attempts so a structural problem (like an unhandled question type, which stops the run immediately instead of retrying, since a retry would only hit the same wall) can't loop forever.
 
 If multiple `lms.binus.ac.id` tabs are open, detection (and the bot itself) targets whichever one it finds first — close the others first if you want a specific tab picked.
 
@@ -135,6 +137,8 @@ Uses `BROWSER` (`chrome`/`brave`/`edge` — CDP attach is Chromium-only) and `BR
    node scripts/run-iframe-exercise.js
    # or, for a whole unit's activity list:
    node scripts/run-unit.js
+   # or, for a checkpoint quiz's gate page:
+   node scripts/run-checkpoint.js
    ```
 
 3. If a question type isn't recognized, check `./logs/unhandled/` for the saved DOM dump and add a new module under `src/questionTypes/` following the existing ones as a template.
@@ -174,10 +178,11 @@ src/
     _optionButtons.js    Shared helpers for MUI-based option UIs; surfaces the page's own incorrect-answer hint text alongside the correct/incorrect outcome, when present
     _ltiQuiz.js          Shared helpers for LTI-embedded quiz UIs, incl. extractInstructionText() (reads the author-written instruction text off the page by its consistent styling, instead of a hardcoded task description)
 scripts/
-  cli.js                   One-command entry: launches browser, waits for login, auto-detects exercise/iframe/unit (or takes an explicit exercise|iframe|unit arg), runs the bot
-  run-exercise.js          Bot logic for native MUI exercises — including the Start/Continue gate screen, numbered-pill question navigation, and the Submit → confirm → result-screen Next finishing sequence some exercises use instead of a plain "Next" button (exports run(driver?), also runnable directly)
+  cli.js                   One-command entry: launches browser, waits for login, auto-detects exercise/iframe/unit/checkpoint (or takes an explicit exercise|iframe|unit|checkpoint arg), runs the bot
+  run-exercise.js          Bot logic for native MUI exercises — including the Start/Continue gate screen, numbered-pill question navigation, and the Submit → confirm → result-screen Next finishing sequence some exercises use instead of a plain "Next" button; the result screen's score is parsed and returned too, for run-checkpoint.js (exports run(driver?) and submitIfPresent(driver), also runnable directly)
   run-iframe-exercise.js   Bot logic for LTI-embedded activities (exports run(driver?), also runnable directly)
   run-unit.js              Walks a unit's activity list end to end: opens the next unfinished row, runs exercise/iframe against it on the same browser session, returns to the list, repeats (exports run(driver?), also runnable directly)
+  run-checkpoint.js        Drives one checkpoint gate to a passing score: clicks Start Attempt N/Continue, runs run-exercise.js's question loop on the same session, and — since attempts are unlimited on the platform — retries the whole checkpoint from the gate (capped at 5 attempts) if the resulting score is under 100; stops immediately instead of retrying on an unhandled question type (exports run(driver?, { runExerciseFn }?), also runnable directly)
 docs/superpowers/
   specs/                 Design docs
   plans/                 Implementation plans
