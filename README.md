@@ -27,14 +27,14 @@ A browser-driven bot that completes the Beelingua English course automatically. 
 
 ### Prerequisites
 
-- Node.js (v20+ recommended)
+- [Bun](https://bun.sh) v1.3+ — the project runs on Bun, not plain Node. This is required for the live OpenTUI dashboard: its renderer needs Bun's native FFI and throws under plain Node even though `@opentui/core` ships a "node" build (that build only satisfies imports/types, not actual rendering). Everything else (selenium-webdriver's CDP attach, chromedriver resolution, the test suite) works identically under Bun.
 - A Chromium-based browser (Chrome, Brave, or Edge), plus a matching [chromedriver](https://googlechromelabs.github.io/chrome-for-testing/) binary — **required** for `scripts/run-exercise.js` / `run-iframe-exercise.js`, which attach over CDP (`--remote-debugging-port`). Firefox and Safari don't support this attach mode.
 - An OpenAI-compatible LLM API (OpenAI itself, or any compatible proxy/provider) or a Gemini API key
 
 ### Install
 
 ```bash
-npm install
+bun install
 ```
 
 ### Configure
@@ -132,13 +132,17 @@ Uses `BROWSER` (`chrome`/`brave`/`edge` — CDP attach is Chromium-only) and `BR
 
 3. If a question type isn't recognized, check `./logs/unhandled/` for the saved DOM dump and add a new module under `src/questionTypes/` following the existing ones as a template.
 
+### Live dashboard
+
+When `npm run bot` / `npm run exercise` / `npm run iframe` is run in a real terminal (stdout is a TTY), an [OpenTUI](https://github.com/anomalyco/opentui) dashboard replaces the raw JSON log lines with a live view: a header, a running correct/incorrect tally, and a scrolling log feed. It's a thin wrapper around the existing logger (`src/logger.js`'s `setSink()`), so `runner.js` and every question-type module are unaware it exists. Piped output (e.g. redirecting to a file, or CI) falls back to the plain JSON lines automatically; set `NO_TUI=1` to force that fallback even in a real terminal.
+
 ## Testing
 
 ```bash
 npm test
 ```
 
-Runs the unit test suite (`node --test`) covering the runner, config, LLM wrapper, progress persistence, logger, browser helpers, and question-type registry. There are no automated tests against the live Beelingua site itself, since it requires a real logged-in session — question-type parsers are verified live during development instead.
+Runs the unit test suite (`bun test`, using Node's built-in `node:test`/`node:assert` APIs — Bun runs those directly) covering the runner, config, LLM wrapper, progress persistence, logger, browser helpers, and question-type registry. There are no automated tests against the live Beelingua site itself, since it requires a real logged-in session — question-type parsers are verified live during development instead.
 
 ## Project structure
 
@@ -147,8 +151,9 @@ src/
   browser.js           WebDriver setup (chrome/firefox/edge/safari), manual-login wait, DOM/iframe helpers (polls for the iframe on load/transitions)
   chromedriver.js      Resolves a chromedriver matching whatever's actually on the CDP debug port (reuses cached, else downloads)
   config.js             Env-driven config (timeouts, retries, paths)
+  dashboard.js         Live OpenTUI view of a run (header, correct/incorrect tally, log feed)
   llm.js                 OpenAI-compatible / Gemini client wrapper
-  logger.js             JSON logging + unhandled-question dumps
+  logger.js             JSON logging + unhandled-question dumps; can redirect to dashboard.js via setSink()
   progress.js           Resumable lesson/section progress (progress.json)
   runner.js               Core per-question loop: parse → answer → check → retry (with a delay between retries)
   questionTypes/
