@@ -1,4 +1,4 @@
-const { waitForQuizFeedback } = require('./_ltiQuiz');
+const { waitForQuizFeedback, extractInstructionText } = require('./_ltiQuiz');
 
 const name = 'fillInBlank';
 
@@ -21,8 +21,9 @@ function parse(dom) {
   const sentence = sentenceMatch ? stripTags(sentenceMatch[1]) : '';
   const fullText = stripTags(html);
   const blankCount = (html.match(/quiz-input-sa/g) || []).length;
+  const instructionText = extractInstructionText(html);
 
-  return { sentence, fullText, blankCount };
+  return { sentence, fullText, blankCount, instructionText };
 }
 
 async function answer(driver, llmResult) {
@@ -41,6 +42,8 @@ async function answer(driver, llmResult) {
   `,
     answers
   );
+
+  await driver.sleep(2000 + Math.random() * 1000);
 
   await driver.executeScript(`
     const btn = document.querySelector('#quiz-submit-btn');

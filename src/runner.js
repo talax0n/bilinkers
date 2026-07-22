@@ -21,6 +21,9 @@ async function processQuestion({
   let outcome = 'incorrect';
 
   while (attempts <= retryLimit) {
+    if (attempts > 0) {
+      await driver.sleep(1500 + Math.random() * 1500);
+    }
     try {
       const llmResult = await answerQuestionFn(llmClient, model, instruction, questionData, feedback);
       await handler.answer(driver, llmResult);

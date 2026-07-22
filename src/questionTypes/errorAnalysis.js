@@ -1,4 +1,4 @@
-const { waitForQuizFeedback } = require('./_ltiQuiz');
+const { waitForQuizFeedback, extractInstructionText } = require('./_ltiQuiz');
 
 const name = 'errorAnalysis';
 
@@ -27,28 +27,34 @@ function parse(dom) {
   const boldMatches = [...html.matchAll(/<b>([\s\S]*?)<\/b>/g)].filter((m) => m[1].includes('<u>'));
   const sentence = stripTags(boldMatches.map((m) => m[1]).join(' '));
 
-  return { sentence, candidates };
+  const instructionText = extractInstructionText(html);
+
+  return { sentence, candidates, instructionText };
 }
 
 async function answer(driver, llmResult) {
-  const letter = llmResult.answer;
-  const index = LETTERS.indexOf(letter);
+  const letters = llmResult.answers || [llmResult.answer];
+  const indexes = letters.map((letter) => LETTERS.indexOf(letter));
 
   const clicked = await driver.executeScript(
     `
-    const index = arguments[0];
+    const indexes = arguments[0];
     const inputs = document.querySelectorAll('.quiz-input-radio');
-    const target = inputs[index];
-    if (!target) return false;
-    target.click();
-    return true;
+    let allFound = true;
+    indexes.forEach((index) => {
+      const target = inputs[index];
+      if (target) { target.click(); } else { allFound = false; }
+    });
+    return allFound;
   `,
-    index
+    indexes
   );
 
   if (!clicked) {
-    throw new Error(`errorAnalysis.answer: no radio option found for letter "${letter}"`);
+    throw new Error(`errorAnalysis.answer: no radio option found for letter(s) "${letters.join(', ')}"`);
   }
+
+  await driver.sleep(2000 + Math.random() * 1000);
 
   await driver.executeScript(`
     const btn = document.querySelector('#quiz-submit-btn');

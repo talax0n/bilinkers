@@ -7,28 +7,45 @@ const fillInBlank = require('../src/questionTypes/fillInBlank');
 const errorAnalysis = require('../src/questionTypes/errorAnalysis');
 const { processQuestion } = require('../src/runner');
 const { createClient, answerQuestion } = require('../src/llm');
+const { resolveChromedriverPath } = require('../src/chromedriver');
 const logger = require('../src/logger');
 
-const INSTRUCTIONS = {
-  fillInBlank:
-    'Fill in the blank(s) in the sentence with the correct word/phrase. If multiple blanks, return {"answers": [...]} in order; if one blank, return {"answer": "..."}.',
+const FORMAT_NOTES = {
+  fillInBlank: 'If multiple blanks, return {"answers": [...]} in order; if one blank, return {"answer": "..."}.',
   errorAnalysis:
-    'The sentence has 4 candidate words, each labeled with a letter (see questionData.candidates). Exactly one of them is grammatically incorrect. Return the letter of the incorrect word as {"answer": "<letter>"}.',
+    'The sentence has candidate words, each labeled with a letter (see questionData.candidates). ' +
+    'There can be more than one matching letter. Return {"answer": "<letter>"} for a single answer, or {"answers": ["<letter>", ...]} if more than one applies.',
 };
 
-// This script attaches to an already-running Brave instance launched with
-// --remote-debugging-port=9222 and answers every question inside the
-// currently open Beelingua LTI-embedded activity (Bits player), advancing
-// via the iframe's own "Continue" link. Unlike run-exercise.js (the native
-// MUI app), this activity's Check-once-per-load UI means a wrong answer
-// cannot be retried in place, so retryLimit is 0 here.
-const CHROMEDRIVER_PATH = '/Users/theo/.cache/selenium/chromedriver/mac-arm64/150.0.7871.124/chromedriver';
+// Neither question type has a fixed task — the on-screen instruction (read
+// straight off the page into questionData.instructionText by the parser,
+// since wording and the graded tense/rule vary per question) is the only
+// source of truth for what to do, used verbatim rather than guessed at.
+function buildInstruction(handler, questionData) {
+  const onScreenInstruction = questionData.instructionText || 'Answer the question as shown.';
+  return `${onScreenInstruction} ${FORMAT_NOTES[handler.name] || ''}`;
+}
+
+// This script attaches to an already-running Chromium-based browser (Chrome,
+// Brave, Edge) launched with --remote-debugging-port=9222 and answers every
+// question inside the currently open Beelingua LTI-embedded activity (Bits
+// player), advancing via the iframe's own "Continue" link. Unlike
+// run-exercise.js (the native MUI app), this activity's Check-once-per-load
+// UI means a wrong answer cannot be retried in place, so retryLimit is 0
+// here. Run via `node scripts/cli.js iframe`, which handles the browser
+// launch + login wait for you, or invoke this file directly if the browser
+// is already up.
+// CHROMEDRIVER_PATH overrides auto-detection below (matches chromedriver to
+// whatever's actually listening on the debug port) — only needed if that
+// fails for your setup.
+const CHROMEDRIVER_PATH = process.env.CHROMEDRIVER_PATH;
 
 async function attachToBrave() {
   const options = new chrome.Options();
   options.debuggerAddress('localhost:9222');
-  const service = new chrome.ServiceBuilder(CHROMEDRIVER_PATH);
-  const driver = await new Builder().forBrowser('chrome').setChromeOptions(options).setChromeService(service).build();
+  const chromedriverPath = CHROMEDRIVER_PATH || (await resolveChromedriverPath());
+  const builder = new Builder().forBrowser('chrome').setChromeOptions(options).setChromeService(new chrome.ServiceBuilder(chromedriverPath));
+  const driver = await builder.build();
 
   const handles = await driver.getAllWindowHandles();
   for (const handle of handles) {
@@ -70,6 +87,11 @@ async function advance(driver) {
   return goToNextQuestionByHash(driver);
 }
 
+// Check re-evaluates on every click (verified live: cycling radio options and
+// re-clicking Check flips .correct.timeout/.incorrect.timeout each time), so
+// a wrong answer can be retried in place instead of restarting the activity.
+const MAX_ANSWER_RETRIES = 10;
+
 async function main() {
   const driver = await attachToBrave();
   const registry = createRegistry();
@@ -90,29 +112,44 @@ async function main() {
       break;
     }
 
+    // Reading/thinking delay before answering, so submissions don't land
+    // suspiciously instantly after the question loads.
+    await dom.driver.sleep(500 + Math.random() * 500);
+
+    const questionData = handler.parse(dom);
+
     const result = await processQuestion({
       driver: dom.driver,
       dom,
       registry,
       llmClient,
       model: config.openai.model,
-      instruction: INSTRUCTIONS[handler.name] || '',
-      retryLimit: 0,
+      instruction: buildInstruction(handler, questionData),
+      retryLimit: MAX_ANSWER_RETRIES,
       answerQuestionFn: answerQuestion,
     });
 
     logger.info('Question processed', { questionNum, type: handler.name, ...result });
+
+    if (result.status === 'incorrect') {
+      logger.warn('Still incorrect after all retries — stopping instead of advancing', { questionNum });
+      break;
+    }
 
     const advanced = await advance(dom.driver);
     if (!advanced) {
       logger.info('Could not advance (no Continue link, no next question hash) — activity complete', { questionNum });
       break;
     }
-    await dom.driver.sleep(500);
+    await dom.driver.sleep(1500 + Math.random() * 1500);
   }
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
+
+module.exports = { run: main };

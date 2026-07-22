@@ -7,13 +7,20 @@ const audioMultipleChoice = require('../src/questionTypes/audioMultipleChoice');
 const readingComprehension = require('../src/questionTypes/readingComprehension');
 const { processQuestion } = require('../src/runner');
 const { createClient, answerQuestion } = require('../src/llm');
+const { resolveChromedriverPath } = require('../src/chromedriver');
 const logger = require('../src/logger');
 
-// This script attaches to an already-running Brave instance launched with
-// --remote-debugging-port=9222 (so your logged-in session/cookies are reused
-// instead of requiring a fresh manual login) and answers every question in
-// whichever Beelingua exercise tab is currently open, in place.
-const CHROMEDRIVER_PATH = '/Users/theo/.cache/selenium/chromedriver/mac-arm64/150.0.7871.124/chromedriver';
+// This script attaches to an already-running Chromium-based browser (Chrome,
+// Brave, Edge) launched with --remote-debugging-port=9222 (so your logged-in
+// session/cookies are reused instead of requiring a fresh manual login) and
+// answers every question in whichever Beelingua exercise tab is currently
+// open, in place. Run via `node scripts/cli.js exercise`, which handles the
+// browser launch + login wait for you, or invoke this file directly if the
+// browser is already up.
+// CHROMEDRIVER_PATH overrides auto-detection below (matches chromedriver to
+// whatever's actually listening on the debug port) — only needed if that
+// fails for your setup.
+const CHROMEDRIVER_PATH = process.env.CHROMEDRIVER_PATH;
 
 // audioMultipleChoice can't be answered intelligently (the bot can't hear the
 // audio), so it cycles every option until Check reports correct instead of
@@ -23,8 +30,9 @@ const BLAST_TYPES = new Set(['audioMultipleChoice']);
 async function attachToBrave() {
   const options = new chrome.Options();
   options.debuggerAddress('localhost:9222');
-  const service = new chrome.ServiceBuilder(CHROMEDRIVER_PATH);
-  const driver = await new Builder().forBrowser('chrome').setChromeOptions(options).setChromeService(service).build();
+  const chromedriverPath = CHROMEDRIVER_PATH || (await resolveChromedriverPath());
+  const builder = new Builder().forBrowser('chrome').setChromeOptions(options).setChromeService(new chrome.ServiceBuilder(chromedriverPath));
+  const driver = await builder.build();
 
   const handles = await driver.getAllWindowHandles();
   for (const handle of handles) {
@@ -88,7 +96,11 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
+
+module.exports = { run: main };

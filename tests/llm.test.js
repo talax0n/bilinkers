@@ -68,3 +68,18 @@ test('answerQuestion throws a clear error when LLM response has no content', asy
     /LLM response had no message content/
   );
 });
+
+test('answerQuestion routes to Gemini when client has getGenerativeModel', async () => {
+  const calls = [];
+  const client = {
+    getGenerativeModel: (opts) => {
+      calls.push(opts);
+      return {
+        generateContent: async () => ({ response: { text: () => '{"answer":"went"}' } }),
+      };
+    },
+  };
+  const result = await answerQuestion(client, 'gemini-1.5-flash', 'Fill the blank', { text: 'She ___ home.' });
+  assert.deepEqual(result, { answer: 'went' });
+  assert.equal(calls[0].model, 'gemini-1.5-flash');
+});

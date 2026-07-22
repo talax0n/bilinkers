@@ -6,9 +6,12 @@
   "scripts": {
     "test": "node --test tests/**/*.test.js",
     "smoke": "node scripts/smoke.js",
-    "start": "node src/runner.js"
+    "start": "node src/runner.js",
+    "exercise": "node scripts/cli.js exercise",
+    "iframe": "node scripts/cli.js iframe"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "dotenv": "^16.4.5",
     "openai": "^4.60.0",
     "selenium-webdriver": "^4.24.0"
