@@ -11,12 +11,12 @@ const logger = require('../src/logger');
 // debugging on, waits for you to log in and open the exercise, then runs the
 // matching bot script. Usage: node scripts/cli.js [exercise|iframe|unit] [url]
 // Mode is optional — if omitted, it's auto-detected from the page after you
-// press Enter (native MUI app vs LTI-embedded iframe activity have distinct,
-// unambiguous DOM markers), so you don't have to know which one to pick.
-// `unit` isn't auto-detected (it's a different kind of page — a unit's
-// activity list, not a single exercise) and must be passed explicitly: open
-// the unit page (e.g. "Unit 2"), then `node scripts/cli.js unit`. It walks
-// every unfinished row in the list, running exercise/iframe on each in turn.
+// press Enter (the native MUI exercise, an LTI-embedded iframe activity, and
+// a unit's own activity list all have distinct, unambiguous DOM markers), so
+// you don't have to know which one to pick. For `unit`, open the unit page
+// (e.g. "Unit 2", the list of activity rows — not a single exercise) before
+// pressing Enter; it walks every unfinished row, running exercise/iframe on
+// each in turn.
 const DEFAULT_BINARY_PATHS = {
   darwin: {
     chrome: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -78,11 +78,21 @@ function waitForEnter(promptText) {
   });
 }
 
-// The two activity types have distinct, unambiguous DOM markers: the native
-// MUI app renders MuiButtonBase/.bl-w-full option buttons directly on the
-// page, while the LTI-embedded activity renders quiz-input-sa/quiz-input-radio
-// inputs inside an iframe. Checking for these removes the need to know which
-// `npm run` command matches what's on screen.
+// Three page kinds share this app's chrome (header, nav icons, the unit's
+// own row list), all built from the same MuiButtonBase/.bl-w-full
+// components — checking for those generically (as this used to) matches
+// every page, including the unit list itself, and always misclassifies it
+// as 'exercise' before ever getting a chance to check for an iframe or the
+// row list. Checked in order of how unambiguous each signal actually is:
+//   1. iframe present -> 'iframe' (the LTI/Bits player only ever appears
+//      wrapped in an iframe, so this is independent of the app chrome noise)
+//   2. lettered option buttons ('bl-w-full justify-content-start', the
+//      narrower class combo readingComprehension/audioMultipleChoice/the
+//      pill-nav MCQ layout all key off of) -> 'exercise'
+//   3. two or more 'button.bl-w-full' rows each carrying a
+//      '.bl-text-ellipsis' title label -> 'unit' (verified live against
+//      the "Unit 2" activity list: exactly this shape, no iframe, no
+//      lettered options)
 async function detectMode() {
   const options = new chrome.Options();
   options.debuggerAddress('localhost:9222');
@@ -95,20 +105,37 @@ async function detectMode() {
     const url = await driver.getCurrentUrl();
     if (!url.includes('lms.binus.ac.id')) continue;
 
-    const topHtml = await driver.executeScript('return document.documentElement.outerHTML');
-    if (topHtml.includes('MuiButtonBase') || topHtml.includes('bl-w-full')) {
-      return 'exercise';
-    }
-
     await driver.switchTo().defaultContent();
     const iframes = await driver.findElements(By.css('iframe'));
     if (iframes.length > 0) {
       await driver.switchTo().frame(iframes[0]);
       const iframeHtml = await driver.executeScript('return document.documentElement.outerHTML');
-      if (iframeHtml.includes('quiz-input-sa') || iframeHtml.includes('quiz-input-radio')) {
+      if (
+        iframeHtml.includes('quiz-input-sa') ||
+        iframeHtml.includes('quiz-input-radio') ||
+        iframeHtml.includes('quiz-matching') ||
+        /href="#\/n"/.test(iframeHtml)
+      ) {
         return 'iframe';
       }
+      await driver.switchTo().defaultContent();
     }
+
+    const topHtml = await driver.executeScript('return document.documentElement.outerHTML');
+    if (topHtml.includes('bl-w-full justify-content-start')) {
+      return 'exercise';
+    }
+
+    const isUnitList = await driver.executeScript(`
+      const rows = document.querySelectorAll('button.bl-w-full');
+      let titled = 0;
+      rows.forEach((b) => { if (b.querySelector('.bl-text-ellipsis')) titled += 1; });
+      return titled >= 2;
+    `);
+    if (isUnitList) {
+      return 'unit';
+    }
+
     return null;
   }
   throw new Error('No lms.binus.ac.id tab found to detect the exercise type from.');

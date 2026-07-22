@@ -9,7 +9,8 @@
     "start": "bun src/runner.js",
     "bot": "bun scripts/cli.js",
     "exercise": "bun scripts/cli.js exercise",
-    "iframe": "bun scripts/cli.js iframe"
+    "iframe": "bun scripts/cli.js iframe",
+    "unit": "bun scripts/cli.js unit"
   },
   "engines": {
     "bun": ">=1.3.0"
