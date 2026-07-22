@@ -1,6 +1,6 @@
 # Beelingua Auto-Bot
 
-A browser-driven bot that completes the Beelingua English course automatically. It reads each question straight out of the page DOM, asks an LLM (any OpenAI-compatible provider, or Gemini) for the answer, and drives Selenium to submit it — retrying once on a wrong answer before moving on.
+A browser-driven bot that completes the Beelingua English course automatically. It reads each question straight out of the page DOM, asks an LLM (any OpenAI-compatible provider, or Gemini) for the answer, and drives Selenium to submit it — retrying in place (up to 10 times, feeding the wrong-answer feedback back to the LLM each try) before giving up on that question.
 
 > [!IMPORTANT]
 > This project is for personal/educational automation of your own coursework. You are responsible for complying with your institution's academic integrity policies before using it.
@@ -9,19 +9,19 @@ A browser-driven bot that completes the Beelingua English course automatically. 
 
 1. **Attach to your browser.** Instead of logging in for you, the bot attaches to an already-running **Chromium-based** browser (Chrome, Brave, Edge — launched with remote debugging enabled) so it reuses your existing logged-in session. This attach path is CDP-based and does not work with Firefox or Safari.
 2. **Detect the question type.** Each question type has a small module under `src/questionTypes/` that knows how to recognize its DOM shape via `detect(dom)`.
-3. **Parse and ask the LLM.** The matching module extracts structured question data (`parse(dom)`), which is sent to the LLM together with type-specific instructions.
-4. **Answer and check.** The module performs the DOM interaction to submit the LLM's answer (`answer(driver, llmResult)`), then checks whether Beelingua marked it correct (`checkResult(dom)`).
-5. **Retry once, then move on.** A wrong answer is retried once with feedback appended to the prompt; if it's still wrong, the bot logs the outcome and advances.
+3. **Parse and ask the LLM.** The matching module extracts structured question data (`parse(dom)`) — for the LTI-embedded types, this includes the *actual on-screen instruction text*, read straight off the page rather than assumed, since both the wording and the graded rule (which tense, find-the-correct-word vs find-the-incorrect-word) vary per question. That instruction is sent to the LLM verbatim, plus a short answer-format note.
+4. **Answer and check.** The module performs the DOM interaction to submit the LLM's answer (`answer(driver, llmResult)`), then checks whether Beelingua marked it correct (`checkResult(dom)`). Answering is paced with randomized human-like delays (reading time before answering, a beat before hitting Check, a gap between retries) rather than firing instantly.
+5. **Retry in place, then stop on that question.** The LTI quiz's Check button re-evaluates on every click rather than locking after one try, so a wrong answer is retried with feedback appended to the prompt — up to `config.retry.maxAnswerRetries` (10) times — before the bot logs it as still incorrect and stops instead of advancing past it.
 6. **Unknown types don't get guessed.** If no registered module matches the DOM, the bot saves the HTML (and a screenshot, where available) to `./logs/unhandled/` and stops, rather than guessing blindly.
 
 ### Supported question types
 
 | Type | Module | Context |
 |---|---|---|
-| Audio multiple choice | `audioMultipleChoice.js` | Cycles every option until Check reports correct (audio can't be transcribed by the bot) |
+| Audio multiple choice | `audioMultipleChoice.js` | Cycles every option in order, clicking Check after each, until one reports correct (audio can't be transcribed by the bot) |
 | Reading comprehension | `readingComprehension.js` | LLM picks the correct option from the passage |
-| Fill in the blank | `fillInBlank.js` | LTI-embedded quiz; LLM fills one or more blanks |
-| Error analysis | `errorAnalysis.js` | LTI-embedded quiz; LLM picks the grammatically incorrect underlined word |
+| Fill in the blank | `fillInBlank.js` | LTI-embedded quiz; LLM fills one or more blanks per the on-screen instruction (tense/rule + worked example, read from the page) |
+| Error analysis | `errorAnalysis.js` | LTI-embedded quiz; LLM picks the matching underlined word(s) — correct or incorrect, per the on-screen instruction — and can return more than one letter |
 
 ## Setup
 
@@ -96,14 +96,21 @@ Don't know if yours matches? Find it yourself:
 `scripts/cli.js` launches your browser with remote debugging on, waits for you to log in, then runs the bot — no manual browser flags needed.
 
 ```bash
-# Native MUI-based exercises (reading comprehension, audio multiple choice)
-npm run exercise
+# Auto-detects which one you need after you open the exercise — no need to
+# know upfront whether it's the native app or an LTI-embedded activity
+npm run bot
 
-# LTI-embedded activities (fill-in-blank, error analysis)
-npm run iframe
+# Or force a specific one:
+npm run exercise   # native MUI-based exercises (reading comprehension, audio multiple choice)
+npm run iframe     # LTI-embedded activities (fill-in-blank, error analysis)
 ```
 
-It opens the browser at `https://lms.binus.ac.id` by default (pass a different URL as an extra arg: `npm run exercise -- https://example.com`), prompts `Log in and open the exercise, then press Enter to start the bot...`, and once you hit Enter, runs the same loop as below: answers each question in place, checks the result, retries once on a wrong answer, and advances until the exercise ends or an unhandled question type is hit.
+It opens the browser at `https://lms.binus.ac.id` by default (pass a different URL as an extra arg: `npm run bot -- https://example.com`), prompts `Log in and open the exercise, then press Enter to start the bot...`, and once you hit Enter:
+
+- With `npm run bot`, it inspects the current tab's DOM (native app renders `MuiButtonBase`/`.bl-w-full` option buttons directly on the page; the LTI activity renders `quiz-input-sa`/`quiz-input-radio` inputs inside an iframe) and picks the matching runner automatically, logging which one it detected.
+- Either way, it then runs the loop described above: answers each question in place, checks the result, retries in place on a wrong answer, and advances until the exercise ends, a question stays wrong after all retries, or an unhandled question type is hit.
+
+If multiple `lms.binus.ac.id` tabs are open, detection (and the bot itself) targets whichever one it finds first — close the others first if you want a specific tab picked.
 
 Uses `BROWSER` (`chrome`/`brave`/`edge` — CDP attach is Chromium-only) and `BROWSER_BINARY_PATH` from `.env` to know which browser to launch; see [Finding your browser binary path](#finding-your-browser-binary-path) if you need to set that.
 
@@ -137,12 +144,13 @@ Runs the unit test suite (`node --test`) covering the runner, config, LLM wrappe
 
 ```
 src/
-  browser.js           WebDriver setup (chrome/firefox/edge/safari), manual-login wait, DOM/iframe helpers
+  browser.js           WebDriver setup (chrome/firefox/edge/safari), manual-login wait, DOM/iframe helpers (polls for the iframe on load/transitions)
+  chromedriver.js      Resolves a chromedriver matching whatever's actually on the CDP debug port (reuses cached, else downloads)
   config.js             Env-driven config (timeouts, retries, paths)
   llm.js                 OpenAI-compatible / Gemini client wrapper
   logger.js             JSON logging + unhandled-question dumps
   progress.js           Resumable lesson/section progress (progress.json)
-  runner.js               Core per-question loop: parse → answer → check → retry
+  runner.js               Core per-question loop: parse → answer → check → retry (with a delay between retries)
   questionTypes/
     registry.js          Ordered detect() lookup across registered types
     audioMultipleChoice.js
@@ -150,9 +158,9 @@ src/
     fillInBlank.js
     errorAnalysis.js
     _optionButtons.js    Shared helpers for MUI-based option UIs
-    _ltiQuiz.js          Shared helpers for LTI-embedded quiz UIs
+    _ltiQuiz.js          Shared helpers for LTI-embedded quiz UIs, incl. extractInstructionText() (reads the author-written instruction text off the page by its consistent styling, instead of a hardcoded task description)
 scripts/
-  cli.js                   One-command entry: launches browser, waits for login, runs the bot
+  cli.js                   One-command entry: launches browser, waits for login, auto-detects exercise type (or takes an explicit exercise|iframe arg), runs the bot
   run-exercise.js          Bot logic for native MUI exercises (exports run(), also runnable directly)
   run-iframe-exercise.js   Bot logic for LTI-embedded activities (exports run(), also runnable directly)
 docs/superpowers/
