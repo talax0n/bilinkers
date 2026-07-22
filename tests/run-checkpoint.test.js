@@ -70,10 +70,10 @@ test('stops when the gate button is never found', { timeout: 10000 }, async () =
   assert.deepEqual(result, { status: 'no-gate', attempt: 1 });
 });
 
-// The review page's body text runs the labels together with no separator
-// ("...Attempted1Score77Completion Date...") — verified live on a real
-// checkpoint that missed 7 of 30 questions.
-test('waitForScore parses the score out of the review page body text', async () => {
+// The post-submit result page's body text reads "...Your Score:83Correct25
+// Incorrect5No Answer0..." — verified live on a real checkpoint that missed
+// 5 of 30 questions.
+test('waitForScore parses the score out of the post-submit result page', async () => {
   const driver = {
     switchTo() { return { defaultContent: async () => {} }; },
     async sleep() {},

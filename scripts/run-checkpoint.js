@@ -72,37 +72,58 @@ async function clickGateButton(driver, timeoutMs = 8000) {
 // A checkpoint's per-question nav is "Save & Next" (verified live — not
 // "Next", which goToNextQuestion() looks for, and not a bare pill click,
 // which navigates without persisting the just-picked option since pills are
-// for jumping/review, not saving) — except the very last question, whose
-// button reads bare "Save" (there's nothing left to advance to). Clicking
-// that final "Save" is also what triggers grading — checkpoints have no
-// separate Submit/Yes/Next confirm step the way run-exercise.js's native
-// exercises do (verified live: no "Submit" button ever appears here at all).
+// for jumping/review, not saving).
 async function clickSaveAndNext(driver) {
   await driver.switchTo().defaultContent();
   return driver.executeScript(`
     const buttons = Array.from(document.querySelectorAll('button'));
-    const btn = buttons.find((b) => {
-      const text = b.textContent.trim();
-      return text === 'Save & Next' || text === 'Save';
-    });
+    const btn = buttons.find((b) => b.textContent.trim() === 'Save & Next');
     if (btn && !btn.disabled) { btn.click(); return true; }
     return false;
   `);
 }
 
-// After the last question's bare "Save" click, the app auto-navigates to
-// .../result/version/{id}/review, e.g.
-// ".../BlCheckpoint/{contentId}/result/version/{versionId}/review" — the
-// review page's own text reads "...Attempted1Score77Completion Date...",
-// so the score sits between the literal words "Score" and "Completion
-// Date" with no separator (verified live: a checkpoint that missed 7 of 30
-// questions read "Score77").
+// The last question has no "Save & Next" — instead it shows a per-question
+// "Save" *and* a checkpoint-wide "Submit" side by side (verified live).
+// "Save" only re-saves the current selection without finalizing anything —
+// clicking it was the original bug here, since it comes before "Submit" in
+// DOM order and looked like a valid advance button. "Submit" is the one
+// that actually finalizes the checkpoint, gated behind an "Are you sure?"
+// Yes/No confirm, same shape as run-exercise.js's native-exercise finishing
+// sequence (but with no further "Next" afterward — the very next render is
+// the result page).
+async function clickSubmit(driver) {
+  await driver.switchTo().defaultContent();
+  const clicked = await driver.executeScript(`
+    const buttons = Array.from(document.querySelectorAll('button'));
+    const btn = buttons.find((b) => b.textContent.trim() === 'Submit');
+    if (btn && !btn.disabled) { btn.click(); return true; }
+    return false;
+  `);
+  if (!clicked) return false;
+
+  await driver.sleep(1000 + Math.random() * 500);
+  await driver.executeScript(`
+    const buttons = Array.from(document.querySelectorAll('button'));
+    const btn = buttons.find((b) => b.textContent.trim() === 'Yes');
+    if (btn && !btn.disabled) { btn.click(); return true; }
+    return false;
+  `);
+  await driver.sleep(1500);
+  return true;
+}
+
+// Confirming Submit lands directly on ".../result/version/{id}" (no
+// "/review" needed just for the number), reading e.g. "...Sorry, Try
+// Again.Your Score:83Correct25Incorrect5No Answer0..." — the score sits
+// right after "Your Score:" with no separator (verified live: a checkpoint
+// that missed 5 of 30 questions read "Your Score:83").
 async function waitForScore(driver, timeoutMs = 10000) {
   await driver.switchTo().defaultContent();
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const score = await driver.executeScript(`
-      const match = document.body.textContent.match(/Score(\\d+)Completion Date/);
+      const match = document.body.textContent.match(/Your Score:(\\d+)/);
       return match ? Number(match[1]) : null;
     `);
     if (score !== null) return score;
@@ -154,23 +175,16 @@ async function answerAllQuestions(driver) {
     logger.info('Checkpoint question answered', { questionNum, type: handler.name, answer: llmResult.answer });
 
     const advanced = await clickSaveAndNext(driver);
-    if (!advanced) {
-      // Genuinely nothing left to click at all — treat as done rather than
-      // loop forever.
-      logger.info('No further Save/Save & Next button — stopping', { questionNum });
-      return { status: 'answered', questionNum };
-    }
+    if (advanced) continue;
 
-    // "Save & Next" (a normal question) stays on the same quiz URL and has
-    // a next question to parse; the last question's bare "Save" redirects
-    // straight to the result/review URL instead — that's the real signal
-    // this was the final question, not just another absent-button case.
-    await driver.sleep(500);
-    const url = await driver.getCurrentUrl();
-    if (/\/result\//.test(url) || /\/review/.test(url)) {
-      logger.info('Reached the result/review page — all questions answered', { questionNum });
-      return { status: 'answered', questionNum };
+    // No "Save & Next" left — this was the last question. Submit the whole
+    // checkpoint instead of trying to advance further (there's no "next"
+    // question to parse).
+    const submitted = await clickSubmit(driver);
+    if (!submitted) {
+      logger.warn('No Save & Next or Submit button found — stopping', { questionNum });
     }
+    return { status: 'answered', questionNum };
   }
 }
 
