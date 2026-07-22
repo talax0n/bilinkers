@@ -72,7 +72,7 @@ async function submitIfPresent(driver) {
     if (btn && !btn.disabled) { btn.click(); return true; }
     return false;
   `);
-  if (!submitted) return false;
+  if (!submitted) return { submitted: false };
 
   await driver.sleep(1000 + Math.random() * 500);
 
@@ -87,22 +87,28 @@ async function submitIfPresent(driver) {
   // The result screen ("Excellent! You Passed! Your Score: 100") takes a
   // beat longer than a fixed sleep to render (score/confetti animation) — a
   // single immediate click attempt right after can miss the "Next" button
-  // entirely and silently leave the run sitting on the result page instead
-  // of back at the unit's activity list. Poll instead of guessing a delay.
+  // entirely. Read the score and click Next in the same executeScript call
+  // each poll so the score text is captured from the same render pass that
+  // triggers the click, instead of racing a separate read against Next
+  // navigating away.
   const deadline = Date.now() + 8000;
+  let score;
   while (Date.now() < deadline) {
-    const clickedNext = await driver.executeScript(`
+    const result = await driver.executeScript(`
+      const scoreMatch = document.body.textContent.match(/Your Score:\\s*(\\d+)/);
       const buttons = Array.from(document.querySelectorAll('button'));
       const btn = buttons.find((b) => b.textContent.trim() === 'Next');
-      if (btn && !btn.disabled) { btn.click(); return true; }
-      return false;
+      const clicked = Boolean(btn && !btn.disabled);
+      if (clicked) btn.click();
+      return { score: scoreMatch ? Number(scoreMatch[1]) : null, clicked };
     `);
-    if (clickedNext) break;
+    if (result.score !== null && score === undefined) score = result.score;
+    if (result.clicked) break;
     await driver.sleep(300);
   }
   await driver.sleep(1500);
 
-  return true;
+  return { submitted: true, score };
 }
 
 // The same numbered-pill layout Submit needs also has no "Next" button to
@@ -166,9 +172,9 @@ async function main(existingDriver) {
       advanced = await clickPillNumber(driver, questionNum + 1);
     }
     if (!advanced) {
-      const submitted = await submitIfPresent(driver);
-      logger.info(submitted ? 'Submitted the exercise' : 'No further "Next" button or pill — exercise complete', { questionNum });
-      return { status: 'complete', questionNum };
+      const submitResult = await submitIfPresent(driver);
+      logger.info(submitResult.submitted ? 'Submitted the exercise' : 'No further "Next" button or pill — exercise complete', { questionNum });
+      return { status: 'complete', questionNum, score: submitResult.score };
     }
   }
 }
@@ -180,4 +186,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { run: main };
+module.exports = { run: main, submitIfPresent };
