@@ -18,7 +18,7 @@ function buildConfig(env) {
       elementWaitMs: 10000,
     },
     retry: {
-      maxAnswerRetries: 1,
+      maxAnswerRetries: 10,
     },
     paths: {
       progressFile: './progress.json',
