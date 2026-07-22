@@ -46,16 +46,29 @@ async function selectOptionAndCheck(driver, letter) {
   `);
 }
 
+// Returns { outcome, hint }, not a bare string: an incorrect answer here
+// (verified live on a True/False/Not-Given reading question) comes with a
+// specific explanation right next to "Incorrect!" — e.g. "Revisit the
+// passage to determine if Jenna's role in organizing the pantry was
+// mentioned." — sitting in a sibling div right after the heading's own
+// wrapper. Surfacing it lets a retry attempt be told exactly what to
+// reconsider instead of just "try again", which otherwise tends to produce
+// the same guess repeatedly on subtler true/false/not-given judgment calls.
 async function waitForCheckFeedback(driver) {
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
     const state = await driver.executeScript(`
       const headings = Array.from(document.querySelectorAll('h5'));
       const heading = headings.find((h) => h.textContent.trim() === 'Correct!' || h.textContent.trim() === 'Incorrect!');
-      return heading ? heading.textContent.trim() : null;
+      if (!heading) return null;
+      const hintEl = heading.parentElement && heading.parentElement.nextElementSibling;
+      return {
+        outcome: heading.textContent.trim(),
+        hint: hintEl ? hintEl.textContent.trim() : null,
+      };
     `);
-    if (state === 'Correct!') return 'correct';
-    if (state === 'Incorrect!') return 'incorrect';
+    if (state && state.outcome === 'Correct!') return { outcome: 'correct', hint: null };
+    if (state && state.outcome === 'Incorrect!') return { outcome: 'incorrect', hint: state.hint || null };
     await driver.sleep(200);
   }
   throw new Error('waitForCheckFeedback: timed out waiting for Correct!/Incorrect! feedback');

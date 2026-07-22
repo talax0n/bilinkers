@@ -107,8 +107,12 @@ const SKIP_LLM_TYPES = new Set(['vocabularyIntro', 'quizMatching']);
 const SELF_ADVANCING_TYPES = new Set(['vocabularyIntro']);
 const noopAnswer = async () => ({});
 
-async function main() {
-  const driver = await attachToBrave();
+// existingDriver lets an orchestrator (run-unit.js) drive one continuous
+// browser session across several activities instead of each script
+// re-attaching its own driver; standalone invocation (via cli.js or `node
+// scripts/run-iframe-exercise.js` directly) still attaches its own as before.
+async function main(existingDriver) {
+  const driver = existingDriver || (await attachToBrave());
   const registry = createRegistry();
   registry.register(fillInBlank);
   registry.register(errorAnalysis);
@@ -127,7 +131,7 @@ async function main() {
     // never matches a registered type — that's expected, not an error.
     if (dom.outerHTML.includes('You can now close this activity')) {
       logger.info('Reached activity closing screen — done', { questionNum });
-      break;
+      return { status: 'complete', questionNum };
     }
 
     const handler = registry.findHandler(dom);
@@ -135,7 +139,7 @@ async function main() {
     if (!handler) {
       logger.saveUnhandled(config.paths.unhandledLogDir, `run-iframe-exercise-q${questionNum}`, { html: dom.outerHTML });
       logger.warn('Unhandled question type — stopping', { questionNum });
-      break;
+      return { status: 'unhandled', questionNum };
     }
 
     // Reading/thinking delay before answering, so submissions don't land
@@ -160,7 +164,7 @@ async function main() {
 
     if (result.status === 'incorrect') {
       logger.warn('Still incorrect after all retries — stopping instead of advancing', { questionNum });
-      break;
+      return { status: 'incorrect', questionNum };
     }
 
     if (SELF_ADVANCING_TYPES.has(handler.name)) {
@@ -170,7 +174,7 @@ async function main() {
     const advanced = await advance(dom.driver);
     if (!advanced) {
       logger.info('Could not advance (no Continue link, no next question hash) — activity complete', { questionNum });
-      break;
+      return { status: 'complete', questionNum };
     }
     await dom.driver.sleep(1500 + Math.random() * 1500);
   }

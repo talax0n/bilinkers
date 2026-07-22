@@ -52,8 +52,81 @@ function blastAnswerFn(options) {
   };
 }
 
-async function main() {
-  const driver = await attachToBrave();
+// Some native exercises (verified live: "Multiple Choice Grammar Activity",
+// a 15-question numbered-pill layout — 1..15 across the top, no per-question
+// "Next" button at all) require an explicit final Submit once every question
+// is answered, gated behind an "Are you sure?" Yes/No confirmation, before
+// the attempt is actually recorded — without this, the questions can all be
+// answered correctly and the exercise still shows as unfinished. Submit ->
+// Yes lands on a result screen ("Excellent! You Passed! Your Score: 100")
+// with its own "Next" button that returns straight to the unit's activity
+// list (verified live: URL dropped back to the plain session URL, progress
+// bar advanced) — clicked here too so the activity is fully closed out
+// rather than left sitting on the result screen. No-op when Submit isn't
+// present, since the reading/audio flow's own "no further Next button" is
+// already a complete, correct finish on its own.
+async function submitIfPresent(driver) {
+  const submitted = await driver.executeScript(`
+    const buttons = Array.from(document.querySelectorAll('button'));
+    const btn = buttons.find((b) => b.textContent.trim() === 'Submit');
+    if (btn && !btn.disabled) { btn.click(); return true; }
+    return false;
+  `);
+  if (!submitted) return false;
+
+  await driver.sleep(1000 + Math.random() * 500);
+
+  await driver.executeScript(`
+    const buttons = Array.from(document.querySelectorAll('button'));
+    const btn = buttons.find((b) => b.textContent.trim() === 'Yes');
+    if (btn && !btn.disabled) { btn.click(); return true; }
+    return false;
+  `);
+  await driver.sleep(1500);
+
+  // The result screen ("Excellent! You Passed! Your Score: 100") takes a
+  // beat longer than a fixed sleep to render (score/confetti animation) — a
+  // single immediate click attempt right after can miss the "Next" button
+  // entirely and silently leave the run sitting on the result page instead
+  // of back at the unit's activity list. Poll instead of guessing a delay.
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    const clickedNext = await driver.executeScript(`
+      const buttons = Array.from(document.querySelectorAll('button'));
+      const btn = buttons.find((b) => b.textContent.trim() === 'Next');
+      if (btn && !btn.disabled) { btn.click(); return true; }
+      return false;
+    `);
+    if (clickedNext) break;
+    await driver.sleep(300);
+  }
+  await driver.sleep(1500);
+
+  return true;
+}
+
+// The same numbered-pill layout Submit needs also has no "Next" button to
+// advance between questions — moving on means clicking the next question's
+// own pill (1..15 across the top) instead.
+async function clickPillNumber(driver, number) {
+  return driver.executeScript(
+    `
+    const target = String(arguments[0]);
+    const buttons = Array.from(document.querySelectorAll('button'));
+    const btn = buttons.find((b) => b.textContent.trim() === target);
+    if (btn && !btn.disabled) { btn.click(); return true; }
+    return false;
+  `,
+    number
+  );
+}
+
+// existingDriver lets an orchestrator (run-unit.js) drive one continuous
+// browser session across several activities instead of each script
+// re-attaching its own driver; standalone invocation (via cli.js or `node
+// scripts/run-exercise.js` directly) still attaches its own as before.
+async function main(existingDriver) {
+  const driver = existingDriver || (await attachToBrave());
   const registry = createRegistry();
   registry.register(audioMultipleChoice);
   registry.register(readingComprehension);
@@ -69,7 +142,7 @@ async function main() {
     if (!handler) {
       logger.saveUnhandled(config.paths.unhandledLogDir, `run-exercise-q${questionNum}`, { html: dom.outerHTML });
       logger.warn('Unhandled question type — stopping', { questionNum });
-      break;
+      return { status: 'unhandled', questionNum };
     }
 
     const questionData = handler.parse(dom);
@@ -88,10 +161,14 @@ async function main() {
 
     logger.info('Question processed', { questionNum, type: handler.name, ...result });
 
-    const advanced = await goToNextQuestion(driver);
+    let advanced = await goToNextQuestion(driver);
     if (!advanced) {
-      logger.info('No further "Next" button — exercise complete', { questionNum });
-      break;
+      advanced = await clickPillNumber(driver, questionNum + 1);
+    }
+    if (!advanced) {
+      const submitted = await submitIfPresent(driver);
+      logger.info(submitted ? 'Submitted the exercise' : 'No further "Next" button or pill — exercise complete', { questionNum });
+      return { status: 'complete', questionNum };
     }
   }
 }

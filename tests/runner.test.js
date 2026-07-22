@@ -74,7 +74,48 @@ test('processQuestion retries once with feedback then gives up', async () => {
   });
 
   assert.deepEqual(result, { status: 'incorrect', attempts: 2 });
-  assert.deepEqual(feedbacks, [null, 'previous answer was wrong, try again']);
+  assert.deepEqual(feedbacks, [
+    null,
+    'previous answer was wrong, try again. Already tried and confirmed wrong: A — do not repeat these.',
+  ]);
+});
+
+test('processQuestion surfaces a hint and lists prior wrong guesses so retries do not repeat them', async () => {
+  const registry = createRegistry();
+  const feedbacks = [];
+  const answersTried = [];
+  registry.register({
+    name: 'tfng',
+    detect: () => true,
+    parse: () => ({ text: 'q' }),
+    answer: async (driver, llmResult) => { answersTried.push(llmResult.answer); },
+    checkResult: async () => ({ outcome: 'incorrect', hint: 'Reread paragraph 3.' }),
+  });
+
+  let call = 0;
+  const answerQuestionFn = async (client, model, instruction, questionData, feedback) => {
+    feedbacks.push(feedback);
+    call += 1;
+    return { answer: call === 1 ? 'A' : 'B' };
+  };
+
+  const result = await processQuestion({
+    driver: { sleep: async () => {} },
+    dom: {},
+    registry,
+    llmClient: {},
+    model: 'gpt-4o',
+    instruction: 'instr',
+    retryLimit: 1,
+    answerQuestionFn,
+  });
+
+  assert.deepEqual(result, { status: 'incorrect', attempts: 2 });
+  assert.deepEqual(answersTried, ['A', 'B']);
+  assert.deepEqual(feedbacks, [
+    null,
+    'previous answer was wrong. Hint: Reread paragraph 3. Already tried and confirmed wrong: A — do not repeat these.',
+  ]);
 });
 
 test('processQuestion treats a throwing handler as incorrect and still respects retryLimit', async () => {

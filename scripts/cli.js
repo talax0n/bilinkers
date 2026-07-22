@@ -9,10 +9,14 @@ const logger = require('../src/logger');
 
 // One-command entry point: launches your Chromium-based browser with remote
 // debugging on, waits for you to log in and open the exercise, then runs the
-// matching bot script. Usage: node scripts/cli.js [exercise|iframe] [url]
+// matching bot script. Usage: node scripts/cli.js [exercise|iframe|unit] [url]
 // Mode is optional — if omitted, it's auto-detected from the page after you
 // press Enter (native MUI app vs LTI-embedded iframe activity have distinct,
 // unambiguous DOM markers), so you don't have to know which one to pick.
+// `unit` isn't auto-detected (it's a different kind of page — a unit's
+// activity list, not a single exercise) and must be passed explicitly: open
+// the unit page (e.g. "Unit 2"), then `node scripts/cli.js unit`. It walks
+// every unfinished row in the list, running exercise/iframe on each in turn.
 const DEFAULT_BINARY_PATHS = {
   darwin: {
     chrome: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -28,6 +32,7 @@ const DEFAULT_BINARY_PATHS = {
 
 const MODES = {
   exercise: '../scripts/run-exercise.js',
+  unit: '../scripts/run-unit.js',
   iframe: '../scripts/run-iframe-exercise.js',
 };
 

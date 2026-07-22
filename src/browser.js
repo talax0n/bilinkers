@@ -53,7 +53,18 @@ async function waitForLogin(driver, { pollMs, timeoutMs, postLoginSelector }) {
 
 // The LTI player injects its content iframe via JS after load, so it isn't
 // there yet on the first check right after a question/page transition.
-async function getCurrentQuestionDom(driver, { iframeWaitMs = 8000, iframePollMs = 200 } = {}) {
+//
+// Opening an activity also briefly renders, inside that same iframe: first
+// an intermediate "LTI launcher" page (a hidden auto-submitting form, id
+// "ltiForm", POSTing off to the actual Bits player), then — even after that
+// POST completes and the Bits app itself has loaded — an empty <main
+// id="content"> for a beat while its JS populates the slide/question into
+// it. Caught in either state, the page has no question markers and no #/n
+// link, so it was previously misread as an unanswerable/unhandled page.
+// Re-checking (with fresh iframe lookups, since navigation happens inside
+// the iframe's own document rather than replacing the <iframe> element
+// itself) waits both out instead.
+async function getCurrentQuestionDom(driver, { iframeWaitMs = 8000, iframePollMs = 200, launcherWaitMs = 8000 } = {}) {
   await driver.switchTo().defaultContent();
 
   let iframes = await driver.findElements(By.css('iframe'));
@@ -65,6 +76,21 @@ async function getCurrentQuestionDom(driver, { iframeWaitMs = 8000, iframePollMs
 
   if (iframes.length > 0) {
     await driver.switchTo().frame(iframes[0]);
+
+    const launcherDeadline = Date.now() + launcherWaitMs;
+    for (;;) {
+      const notReady = await driver.executeScript(`
+        if (document.getElementById('ltiForm')) return true;
+        const content = document.getElementById('content');
+        return !!content && content.children.length === 0;
+      `);
+      if (!notReady || Date.now() > launcherDeadline) break;
+      await driver.sleep(300);
+      await driver.switchTo().defaultContent();
+      const freshIframes = await driver.findElements(By.css('iframe'));
+      if (freshIframes.length === 0) break;
+      await driver.switchTo().frame(freshIframes[0]);
+    }
   }
 
   const outerHTML = await driver.executeScript('return document.documentElement.outerHTML');
