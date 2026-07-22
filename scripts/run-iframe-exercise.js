@@ -5,6 +5,8 @@ const { getCurrentQuestionDom } = require('../src/browser');
 const { createRegistry } = require('../src/questionTypes/registry');
 const fillInBlank = require('../src/questionTypes/fillInBlank');
 const errorAnalysis = require('../src/questionTypes/errorAnalysis');
+const vocabularyIntro = require('../src/questionTypes/vocabularyIntro');
+const quizMatching = require('../src/questionTypes/quizMatching');
 const { processQuestion } = require('../src/runner');
 const { createClient, answerQuestion } = require('../src/llm');
 const { resolveChromedriverPath } = require('../src/chromedriver');
@@ -92,11 +94,26 @@ async function advance(driver) {
 // a wrong answer can be retried in place instead of restarting the activity.
 const MAX_ANSWER_RETRIES = 10;
 
+// vocabularyIntro pages aren't graded and have nothing to answer, so there's
+// no need to burn an LLM call on them — a no-op stands in for answerQuestion,
+// and the handler's own answer() already clicks "#/n" to move on, so the
+// generic advance() step (which only knows about .quiz-next-btn / #/question-N)
+// is skipped for this type instead of running and wrongly declaring the
+// activity complete. quizMatching is also LLM-free (its answer is derived
+// deterministically from the page's own data-drag/data-drag-target indexes,
+// not guessed), but it isn't self-advancing — it uses the normal
+// .quiz-next-btn Continue flow once Check passes, same as fillInBlank/errorAnalysis.
+const SKIP_LLM_TYPES = new Set(['vocabularyIntro', 'quizMatching']);
+const SELF_ADVANCING_TYPES = new Set(['vocabularyIntro']);
+const noopAnswer = async () => ({});
+
 async function main() {
   const driver = await attachToBrave();
   const registry = createRegistry();
   registry.register(fillInBlank);
   registry.register(errorAnalysis);
+  registry.register(quizMatching);
+  registry.register(vocabularyIntro);
 
   const llmClient = createClient(config);
 
@@ -104,6 +121,15 @@ async function main() {
   for (;;) {
     questionNum += 1;
     const dom = await getCurrentQuestionDom(driver);
+
+    // The activity's final slide ("You can now close this activity and
+    // continue to the next one") has no #/n link and no quiz markers, so it
+    // never matches a registered type — that's expected, not an error.
+    if (dom.outerHTML.includes('You can now close this activity')) {
+      logger.info('Reached activity closing screen — done', { questionNum });
+      break;
+    }
+
     const handler = registry.findHandler(dom);
 
     if (!handler) {
@@ -117,6 +143,7 @@ async function main() {
     await dom.driver.sleep(500 + Math.random() * 500);
 
     const questionData = handler.parse(dom);
+    const skipLlm = SKIP_LLM_TYPES.has(handler.name);
 
     const result = await processQuestion({
       driver: dom.driver,
@@ -125,8 +152,8 @@ async function main() {
       llmClient,
       model: config.openai.model,
       instruction: buildInstruction(handler, questionData),
-      retryLimit: MAX_ANSWER_RETRIES,
-      answerQuestionFn: answerQuestion,
+      retryLimit: skipLlm ? 0 : MAX_ANSWER_RETRIES,
+      answerQuestionFn: skipLlm ? noopAnswer : answerQuestion,
     });
 
     logger.info('Question processed', { questionNum, type: handler.name, ...result });
@@ -134,6 +161,10 @@ async function main() {
     if (result.status === 'incorrect') {
       logger.warn('Still incorrect after all retries — stopping instead of advancing', { questionNum });
       break;
+    }
+
+    if (SELF_ADVANCING_TYPES.has(handler.name)) {
+      continue;
     }
 
     const advanced = await advance(dom.driver);
