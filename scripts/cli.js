@@ -5,6 +5,7 @@ const readline = require('readline');
 const { Builder, By } = require('selenium-webdriver');
 const chrome = require('selenium-webdriver/chrome');
 const { resolveChromedriverPath } = require('../src/chromedriver');
+const logger = require('../src/logger');
 
 // One-command entry point: launches your Chromium-based browser with remote
 // debugging on, waits for you to log in and open the exercise, then runs the
@@ -138,8 +139,22 @@ async function main() {
     console.log(`Detected: ${mode}`);
   }
 
-  const { run } = require(MODES[mode]);
-  await run();
+  // The plain JSON-line logger and a live OpenTUI dashboard both fight for
+  // the same terminal, so the dashboard only takes over when running
+  // interactively (a real TTY) — piped/CI output keeps the JSON lines.
+  let dashboard = null;
+  if (process.stdout.isTTY && !process.env.NO_TUI) {
+    const { createDashboard } = require('../src/dashboard');
+    dashboard = await createDashboard({ title: `Beelingua Bot — ${mode}` });
+    logger.setSink(dashboard.onLog);
+  }
+
+  try {
+    const { run } = require(MODES[mode]);
+    await run();
+  } finally {
+    if (dashboard) dashboard.stop();
+  }
 }
 
 if (require.main === module) {

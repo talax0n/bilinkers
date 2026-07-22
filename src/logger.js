@@ -1,7 +1,18 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
+// When a dashboard (src/dashboard.js) is active, JSON lines would just
+// corrupt its rendered UI, so output is redirected there instead of stdout.
+let sink = null;
+function setSink(nextSink) {
+  sink = nextSink;
+}
+
 function log(level, message, meta = {}) {
+  if (sink) {
+    sink(level, message, meta);
+    return;
+  }
   console.log(JSON.stringify({ time: new Date().toISOString(), level, message, ...meta }));
 }
 
@@ -22,4 +33,4 @@ function saveUnhandled(dir, name, { screenshotBuffer, html }) {
   return { pngPath, htmlPath };
 }
 
-module.exports = { info, warn, error, saveUnhandled };
+module.exports = { info, warn, error, saveUnhandled, setSink };

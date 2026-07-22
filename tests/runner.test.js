@@ -7,7 +7,7 @@ test('processQuestion returns unhandled when no type module matches', async () =
   const registry = createRegistry();
   registry.register({ name: 'mcq', detect: () => false });
   const result = await processQuestion({
-    driver: {},
+    driver: { sleep: async () => {} },
     dom: {},
     registry,
     llmClient: {},
@@ -32,7 +32,7 @@ test('processQuestion succeeds on first attempt when correct', async () => {
   const answerQuestionFn = async () => ({ answer: 'A' });
 
   const result = await processQuestion({
-    driver: {},
+    driver: { sleep: async () => {} },
     dom: {},
     registry,
     llmClient: {},
@@ -63,7 +63,7 @@ test('processQuestion retries once with feedback then gives up', async () => {
   };
 
   const result = await processQuestion({
-    driver: {},
+    driver: { sleep: async () => {} },
     dom: {},
     registry,
     llmClient: {},
@@ -90,7 +90,7 @@ test('processQuestion treats a throwing handler as incorrect and still respects 
   const answerQuestionFn = async () => ({ answer: 'A' });
 
   const result = await processQuestion({
-    driver: {},
+    driver: { sleep: async () => {} },
     dom: {},
     registry,
     llmClient: {},
@@ -116,7 +116,7 @@ test('processQuestion treats an unexpected checkResult value as incorrect', asyn
   const answerQuestionFn = async () => ({ answer: 'A' });
 
   const result = await processQuestion({
-    driver: {},
+    driver: { sleep: async () => {} },
     dom: {},
     registry,
     llmClient: {},
