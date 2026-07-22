@@ -85,4 +85,4 @@ async function processQuestion({
   return { status: outcome, attempts };
 }
 
-module.exports = { processQuestion };
+module.exports = { processQuestion, callWithRetry };

@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { run: runCheckpoint } = require('../scripts/run-checkpoint');
+const { run: runCheckpoint, waitForScore } = require('../scripts/run-checkpoint');
 
 function makeDriver({ gateClickable = true } = {}) {
   const urls = ['https://lms.binus.ac.id/checkpoint-gate'];
@@ -68,4 +68,31 @@ test('stops when the gate button is never found', { timeout: 10000 }, async () =
   const runExerciseFn = async () => { throw new Error('should not be called'); };
   const result = await runCheckpoint(driver, { runExerciseFn });
   assert.deepEqual(result, { status: 'no-gate', attempt: 1 });
+});
+
+// The review page's body text runs the labels together with no separator
+// ("...Attempted1Score77Completion Date...") — verified live on a real
+// checkpoint that missed 7 of 30 questions.
+test('waitForScore parses the score out of the review page body text', async () => {
+  const driver = {
+    switchTo() { return { defaultContent: async () => {} }; },
+    async sleep() {},
+    async executeScript() {
+      return 77;
+    },
+  };
+  const score = await waitForScore(driver);
+  assert.equal(score, 77);
+});
+
+test('waitForScore resolves undefined if the score never appears within the timeout', async () => {
+  const driver = {
+    switchTo() { return { defaultContent: async () => {} }; },
+    async sleep() {},
+    async executeScript() {
+      return null;
+    },
+  };
+  const score = await waitForScore(driver, 50);
+  assert.equal(score, undefined);
 });
