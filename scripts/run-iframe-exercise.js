@@ -12,11 +12,11 @@ const { createClient, answerQuestion } = require('../src/llm');
 const { resolveChromedriverPath } = require('../src/chromedriver');
 const logger = require('../src/logger');
 
+// errorAnalysis has no entry here — it's answered by brute force
+// (createBruteForceAnswerer below), not an LLM call, so no format note is
+// ever read for it.
 const FORMAT_NOTES = {
   fillInBlank: 'If multiple blanks, return {"answers": [...]} in order; if one blank, return {"answer": "..."}.',
-  errorAnalysis:
-    'The sentence has candidate words, each labeled with a letter (see questionData.candidates). ' +
-    'There can be more than one matching letter. Return {"answer": "<letter>"} for a single answer, or {"answers": ["<letter>", ...]} if more than one applies.',
 };
 
 // Neither question type has a fixed task — the on-screen instruction (read
@@ -103,9 +103,32 @@ const MAX_ANSWER_RETRIES = 10;
 // deterministically from the page's own data-drag/data-drag-target indexes,
 // not guessed), but it isn't self-advancing — it uses the normal
 // .quiz-next-btn Continue flow once Check passes, same as fillInBlank/errorAnalysis.
-const SKIP_LLM_TYPES = new Set(['vocabularyIntro', 'quizMatching']);
-const SELF_ADVANCING_TYPES = new Set(['vocabularyIntro']);
+const SKIP_LLM_TYPES = new Set(['quizMatching']);
+const SELF_ADVANCING_TYPES = new Set();
+// Non-graded presentation slides — walked forward, never counted or graded
+// as questions (see the main loop).
+const PRESENTATION_TYPES = new Set(['vocabularyIntro']);
 const noopAnswer = async () => ({});
+
+// errorAnalysis is answered by brute force instead of an LLM call: try A,
+// then B, then C, ... in order, one per retry, until Check passes. Simpler
+// and more reliable than reasoning about grammar through a model — there
+// are at most a handful of candidates, so exhausting them is cheap, and
+// runner.js's own retry loop (one attempt per call here) already drives
+// the "try next, check, repeat" sequence. A fresh instance per question
+// keeps the attempt counter from leaking across questions.
+function createBruteForceAnswerer() {
+  let attemptIndex = 0;
+  return async (client, model, instruction, questionData) => {
+    const candidate = questionData.candidates[attemptIndex];
+    attemptIndex += 1;
+    if (!candidate) {
+      throw new Error('errorAnalysis brute force: exhausted all candidate letters without a correct answer');
+    }
+    return { answer: candidate.letter };
+  };
+}
+const BRUTE_FORCE_TYPES = new Set(['errorAnalysis']);
 
 // existingDriver lets an orchestrator (run-unit.js) drive one continuous
 // browser session across several activities instead of each script
@@ -122,25 +145,40 @@ async function main(existingDriver) {
   const llmClient = createClient(config);
 
   let questionNum = 0;
+  let slideNum = 0;
   for (;;) {
-    questionNum += 1;
+    slideNum += 1;
     const dom = await getCurrentQuestionDom(driver);
 
     // The activity's final slide ("You can now close this activity and
     // continue to the next one") has no #/n link and no quiz markers, so it
     // never matches a registered type — that's expected, not an error.
     if (dom.outerHTML.includes('You can now close this activity')) {
-      logger.info('Reached activity closing screen — done', { questionNum });
+      logger.info('Reached activity closing screen — done', { questions: questionNum });
       return { status: 'complete', questionNum };
     }
 
     const handler = registry.findHandler(dom);
 
     if (!handler) {
-      logger.saveUnhandled(config.paths.unhandledLogDir, `run-iframe-exercise-q${questionNum}`, { html: dom.outerHTML });
-      logger.warn('Unhandled question type — stopping', { questionNum });
-      return { status: 'unhandled', questionNum };
+      logger.saveUnhandled(config.paths.unhandledLogDir, `run-iframe-exercise-slide${slideNum}`, { html: dom.outerHTML });
+      logger.warn('Unhandled question type — stopping', { slideNum });
+      return { status: 'unhandled', slideNum };
     }
+
+    // Presentation slides (a vocabulary unit's word / meaning-and-example
+    // cards) sit between the real questions in the same iframe SPA. They're
+    // not graded and have nothing to answer — just walk them forward via
+    // their own #/n link, without counting or grading them as questions
+    // (otherwise a vocab unit logs dozens of "Question processed" lines for
+    // slides that were never questions).
+    if (PRESENTATION_TYPES.has(handler.name)) {
+      await handler.answer(dom.driver);
+      await dom.driver.sleep(300 + Math.random() * 300);
+      continue;
+    }
+
+    questionNum += 1;
 
     // Reading/thinking delay before answering, so submissions don't land
     // suspiciously instantly after the question loads.
@@ -148,6 +186,7 @@ async function main(existingDriver) {
 
     const questionData = handler.parse(dom);
     const skipLlm = SKIP_LLM_TYPES.has(handler.name);
+    const bruteForce = BRUTE_FORCE_TYPES.has(handler.name);
 
     const result = await processQuestion({
       driver: dom.driver,
@@ -157,7 +196,7 @@ async function main(existingDriver) {
       model: config.openai.model,
       instruction: buildInstruction(handler, questionData),
       retryLimit: skipLlm ? 0 : MAX_ANSWER_RETRIES,
-      answerQuestionFn: skipLlm ? noopAnswer : answerQuestion,
+      answerQuestionFn: bruteForce ? createBruteForceAnswerer() : skipLlm ? noopAnswer : answerQuestion,
     });
 
     logger.info('Question processed', { questionNum, type: handler.name, ...result });
