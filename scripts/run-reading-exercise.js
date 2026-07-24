@@ -29,6 +29,7 @@ const CHROMEDRIVER_PATH = process.env.CHROMEDRIVER_PATH;
 // so tried-letter memory survives the item scrolling in and out of view as
 // the loop navigates between passages.
 const TRIED = new Map();
+const LETTERS = ['A', 'B', 'C', 'D', 'E', 'F'];
 
 async function attachToBrave() {
   const options = new chrome.Options();
@@ -129,6 +130,57 @@ async function gradeCurrent(driver) {
   `);
 }
 
+// Is there a per-question "Check" (a.k.a. "Check My Answer") button on the
+// current screen? Those questions grade one option at a time in place, so
+// they can be brute-forced without leaving the question.
+async function hasCheckButton(driver) {
+  return driver.executeScript(`
+    return !![...document.querySelectorAll('button')].find(b => /^Check( My Answer)?$/i.test(b.textContent.trim()) && !b.disabled);
+  `);
+}
+
+async function countEnabledOptions(driver) {
+  return driver.executeScript(`
+    return [...document.querySelectorAll('button.bl-w-full.justify-content-start')].filter(b => !b.disabled).length;
+  `);
+}
+
+// In-place brute force for a "Check My Answer" question: pick A, Check, and
+// if the feedback says "Incorrect!" the options stay enabled (verified live)
+// so pick B, Check, ... through E until "Correct!" locks the question. Fully
+// resolves the question in a single visit. Returns 'correct' | 'exhausted'.
+async function answerCheckQuestion(driver) {
+  for (const letter of LETTERS) {
+    const state = await driver.executeScript(
+      `
+      const letter = arguments[0];
+      const opts = [...document.querySelectorAll('button.bl-w-full.justify-content-start')];
+      if (!opts.some(b => !b.disabled)) return 'locked';
+      const target = opts.find(b => !b.disabled && b.textContent.trim()[0] === letter);
+      if (!target) return 'no-letter';
+      target.click();
+      return 'selected';
+    `,
+      letter
+    );
+    if (state === 'locked') return 'correct'; // already solved this visit
+    if (state === 'no-letter') continue; // fewer than 5 options — skip missing letters
+
+    await driver.sleep(400);
+    await driver.executeScript(`const c = [...document.querySelectorAll('button')].find(b => /^Check( My Answer)?$/i.test(b.textContent.trim()) && !b.disabled); if (c) c.click();`);
+    await driver.sleep(1400);
+
+    const outcome = await driver.executeScript(`
+      const h = [...document.querySelectorAll('h1,h2,h3,h4,h5,h6')].find(x => /^(Correct!|Incorrect!)$/i.test(x.textContent.trim()));
+      return h ? h.textContent.trim() : null;
+    `);
+    logger.info('Reading exercise: check attempt', { letter, outcome });
+    if (outcome === 'Correct!') return 'correct';
+    // 'Incorrect!' — options stay enabled, loop to the next letter.
+  }
+  return 'exhausted';
+}
+
 // Finalises once every tile is teal. Opens the Submit confirm and clicks the
 // modal's own Submit; if the "all answers must be correct" guard fires, backs
 // out via Close so the loop keeps fixing. Returns 'done' | 'blocked' | 'no-submit'.
@@ -209,8 +261,23 @@ async function main(existingDriver) {
       await clickTile(driver, n);
       await driver.sleep(800);
 
+      if ((await countEnabledOptions(driver)) === 0) continue; // all locked = correct
+
+      // Branch on the question's own UI: a "Check My Answer" button grades one
+      // option at a time in place, so cycle it to a correct answer without
+      // leaving the question. Otherwise it's a deferred "Save & Next" item —
+      // fall back to the blocking method (answer, advance, revisit wrongs on a
+      // later pass; correctness comes from the option lock).
+      if (await hasCheckButton(driver)) {
+        const outcome = await answerCheckQuestion(driver);
+        answeredThisPass += 1;
+        await driver.sleep(600);
+        logger.info('Reading exercise: check question', { pass, tile: n, outcome });
+        continue;
+      }
+
       const acted = await answerOpenGroups(driver, Object.fromEntries([...TRIED].map(([k, v]) => [k, [...v]])));
-      if (acted.length === 0) continue; // all locked = correct, nothing to do
+      if (acted.length === 0) continue;
 
       answeredThisPass += acted.length;
       await driver.sleep(400);
