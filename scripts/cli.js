@@ -6,6 +6,7 @@ const { Builder, By } = require('selenium-webdriver');
 const chrome = require('selenium-webdriver/chrome');
 const { resolveChromedriverPath } = require('../src/chromedriver');
 const logger = require('../src/logger');
+const { isGroupedReadingLayout, groupedReadingLayoutFromDocument } = require('./grouped-reading');
 
 // One-command entry point: launches your Chromium-based browser with remote
 // debugging on, waits for you to log in and open the exercise, then runs the
@@ -89,10 +90,11 @@ function waitForEnter(promptText) {
 // row list. Checked in order of how unambiguous each signal actually is:
 //   1. iframe present -> 'iframe' (the LTI/Bits player only ever appears
 //      wrapped in an iframe, so this is independent of the app chrome noise)
-//   2. lettered option buttons ('bl-w-full justify-content-start', the
-//      narrower class combo readingComprehension/audioMultipleChoice/the
-//      pill-nav MCQ layout all key off of) -> 'exercise'
-//   3. two or more 'button.bl-w-full' rows each carrying a
+//   2. iframe reading -> 'reading'
+//   3. checkpoint gate -> 'checkpoint'
+//   4. top-level grouped reading -> 'reading'
+//   5. generic top-level option buttons -> 'exercise'
+//   6. two or more 'button.bl-w-full' rows each carrying a
 //      '.bl-text-ellipsis' title label -> 'unit' (verified live against
 //      the "Unit 2" activity list: exactly this shape, no iframe, no
 //      lettered options)
@@ -150,6 +152,11 @@ async function detectMode() {
     `);
     if (isCheckpointGate) {
       return 'checkpoint';
+    }
+
+    const topLevelLayout = await driver.executeScript(`return (${groupedReadingLayoutFromDocument.toString()})()`);
+    if (isGroupedReadingLayout(topLevelLayout)) {
+      return 'reading';
     }
 
     if (topHtml.includes('bl-w-full justify-content-start')) {

@@ -5,6 +5,7 @@ const logger = require('../src/logger');
 const { run: runExercise } = require('./run-exercise');
 const { run: runIframeExercise } = require('./run-iframe-exercise');
 const { run: runReadingExercise } = require('./run-reading-exercise');
+const { isGroupedReadingLayout, groupedReadingLayoutFromDocument } = require('./grouped-reading');
 
 // This script attaches to an already-running Chromium-based browser (Chrome,
 // Brave, Edge) launched with --remote-debugging-port=9222, and drives a
@@ -151,6 +152,9 @@ async function detectMode(driver) {
     if (iframeHtml.includes('bl-w-full justify-content-start')) return 'reading';
     return 'iframe';
   }
+
+  const topLevelLayout = await driver.executeScript(`return (${groupedReadingLayoutFromDocument.toString()})()`);
+  if (isGroupedReadingLayout(topLevelLayout)) return 'reading';
 
   const topHtml = await driver.executeScript('return document.documentElement.outerHTML');
   if (topHtml.includes('bl-w-full justify-content-start')) return 'exercise';
