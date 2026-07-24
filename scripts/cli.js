@@ -34,7 +34,9 @@ const MODES = {
   exercise: '../scripts/run-exercise.js',
   unit: '../scripts/run-unit.js',
   iframe: '../scripts/run-iframe-exercise.js',
+  reading: '../scripts/run-reading-exercise.js',
   checkpoint: '../scripts/run-checkpoint.js',
+  'checkpoint-capture': '../scripts/run-checkpoint-capture.js',
 };
 
 function resolveBinaryPath() {
@@ -118,6 +120,14 @@ async function detectMode() {
         /href="#\/n"/.test(iframeHtml)
       ) {
         return 'iframe';
+      }
+      // The reading BlExercise (passage + numbered 1..N tiles, lettered
+      // option buttons) is ALSO iframe-embedded, but uses the MUI
+      // 'bl-w-full justify-content-start' option buttons rather than the
+      // Bits player's quiz-input-* markup — so it's distinguished from a
+      // native (top-level) 'exercise' by living inside the iframe.
+      if (iframeHtml.includes('bl-w-full justify-content-start')) {
+        return 'reading';
       }
       await driver.switchTo().defaultContent();
     }
