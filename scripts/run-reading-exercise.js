@@ -11,10 +11,9 @@ const logger = require('../src/logger');
 //   - A wrong answer re-enables its options (you can re-pick), a CORRECT
 //     answer locks them (all disabled). So each question is just cycled
 //     A -> B -> C -> D until it sticks — no reasoning needed.
-//   - Each tile's background colour is the per-question verdict, updated the
-//     moment an answer is graded (both the "Check" and "Save & Next" item
-//     types colour the tile), so it's the one signal that works for every
-//     item type here:
+//   - Each tile's background colour is the per-question verdict, updated when
+//     a Check action or numbered-pill transition grades the answer. It is the
+//     one signal that works for every item type here:
 //       correct   -> rgba(54, 192, 203, .3)  (faint teal)
 //       wrong     -> rgba(232, 166, 38, .3)  (faint orange)
 //       unanswered-> rgb(127, 202, 212)      (solid teal)
@@ -25,10 +24,8 @@ const logger = require('../src/logger');
 // CHROMEDRIVER_PATH overrides chromedriver auto-detection if needed.
 const CHROMEDRIVER_PATH = process.env.CHROMEDRIVER_PATH;
 
-// A question is keyed by its first option's text (stable + unique per item),
-// so tried-letter memory survives the item scrolling in and out of view as
-// the loop navigates between passages.
-const TRIED = new Map();
+// A group is keyed by pill and group index, so tried-letter memory survives
+// navigation within one run without colliding on repeated option text.
 const LETTERS = ['A', 'B', 'C', 'D', 'E', 'F'];
 
 async function attachToBrave() {
@@ -47,31 +44,36 @@ async function attachToBrave() {
   throw new Error('No lms.binus.ac.id tab found among open Brave windows.');
 }
 
-// How many numbered tiles the exercise has (1..N across the top).
-async function countTiles(driver) {
+async function readPills(driver) {
   return driver.executeScript(`
-    const seen = {};
-    for (const el of document.querySelectorAll('*')) {
-      const t = (el.textContent || '').trim();
-      if (!/^\\d{1,2}$/.test(t) || el.children.length > 1) continue;
-      const bg = getComputedStyle(el).backgroundColor;
-      if (!bg || bg === 'rgba(0, 0, 0, 0)') continue;
-      seen[t] = 1;
-    }
-    return Object.keys(seen).length;
+    return [...document.querySelectorAll('.bl-button__container')]
+      .map((pill) => Number(pill.textContent.trim()))
+      .filter((pill) => Number.isInteger(pill) && pill > 0)
+      .filter((pill, index, all) => all.indexOf(pill) === index)
+      .sort((a, b) => a - b);
   `);
 }
 
-async function clickTile(driver, n) {
-  await driver.executeScript(
+async function clickPill(driver, n) {
+  return driver.executeScript(
     `
     const target = String(arguments[0]);
-    const els = [...document.querySelectorAll('*')].filter(el => el.textContent.trim() === target && el.children.length <= 1);
-    const t = els.find(el => getComputedStyle(el).cursor === 'pointer') || els[0];
-    if (t) t.click();
+    const pill = [...document.querySelectorAll('.bl-button__container')]
+      .find((element) => element.textContent.trim() === target);
+    if (pill) { pill.click(); return true; }
+    return false;
   `,
     String(n)
   );
+}
+
+async function leaveByNextPill(driver, pills, currentPill) {
+  const currentIndex = pills.indexOf(currentPill);
+  const nextPill = pills[(currentIndex + 1) % pills.length];
+  if (nextPill === undefined || nextPill === currentPill) return false;
+  const clicked = await clickPill(driver, nextPill);
+  if (clicked) await driver.sleep(1000);
+  return clicked;
 }
 
 // Answers every still-open option-group on the current screen (a group whose
@@ -79,11 +81,13 @@ async function clickTile(driver, n) {
 // buttons; a new group starts each time the letter resets to "A". Picks the
 // first letter not already tried for that group, so repeated visits walk
 // A -> B -> C -> D instead of re-picking the same wrong option.
-async function answerOpenGroups(driver, triedObj) {
+async function answerOpenGroups(driver, triedMap, pill) {
+  const triedObj = Object.fromEntries([...triedMap].map(([key, value]) => [key, [...value]]));
   const acted = await driver.executeScript(
     `
     const tried = arguments[0] || {};
-    const btns = [...document.querySelectorAll('button.bl-w-full.justify-content-start')];
+    const btns = [...document.querySelectorAll('button.bl-w-full.justify-content-start')]
+      .filter((button) => button.offsetParent !== null);
     const groups = [];
     let cur = null;
     for (const b of btns) {
@@ -92,10 +96,10 @@ async function answerOpenGroups(driver, triedObj) {
       if (cur) cur.push(b);
     }
     const acted = [];
-    for (const g of groups) {
+    for (const [groupIndex, g] of groups.entries()) {
       const enabled = g.filter(b => !b.disabled);
       if (!enabled.length) continue; // locked = already correct
-      const key = g[0].textContent.trim().slice(0, 60);
+      const key = [arguments[1], groupIndex, g[0].textContent.trim().slice(0, 60)].join(':');
       const done = tried[key] || [];
       const pick = enabled.find(b => !done.includes(b.textContent.trim()[0])) || enabled[0];
       const letter = pick.textContent.trim()[0];
@@ -104,30 +108,15 @@ async function answerOpenGroups(driver, triedObj) {
     }
     return acted;
   `,
-    triedObj
+    triedObj,
+    pill
   );
   acted.forEach(({ key, letter }) => {
-    const set = TRIED.get(key) || new Set();
+    const set = triedMap.get(key) || new Set();
     set.add(letter);
-    TRIED.set(key, set);
+    triedMap.set(key, set);
   });
   return acted;
-}
-
-// Grades what was just answered. "Check" and "Save & Next" both grade the
-// screen (and colour the tiles); either one is fine since the outer loop
-// re-navigates by tile afterwards. Returns true if something was clicked.
-async function gradeCurrent(driver) {
-  return driver.executeScript(`
-    const b = [...document.querySelectorAll('button')];
-    const check = b.find(x => x.textContent.trim() === 'Check' && !x.disabled);
-    if (check) { check.click(); return true; }
-    const sn = b.find(x => x.textContent.trim() === 'Save & Next' && !x.disabled);
-    if (sn) { sn.click(); return true; }
-    const next = b.find(x => x.textContent.trim() === 'Next' && !x.disabled);
-    if (next) { next.click(); return true; }
-    return false;
-  `);
 }
 
 // Is there a per-question "Check" (a.k.a. "Check My Answer") button on the
@@ -141,7 +130,8 @@ async function hasCheckButton(driver) {
 
 async function countEnabledOptions(driver) {
   return driver.executeScript(`
-    return [...document.querySelectorAll('button.bl-w-full.justify-content-start')].filter(b => !b.disabled).length;
+    return [...document.querySelectorAll('button.bl-w-full.justify-content-start')]
+      .filter((button) => button.offsetParent !== null && !button.disabled).length;
   `);
 }
 
@@ -242,9 +232,15 @@ async function readResultAndAdvance(driver) {
 
 async function main(existingDriver) {
   const driver = existingDriver || (await attachToBrave());
+  const tried = new Map();
 
   await getCurrentQuestionDom(driver);
-  const tileCount = (await countTiles(driver)) || 15;
+  const pills = await readPills(driver);
+  const tileCount = pills.length;
+  if (tileCount < 2) {
+    logger.warn('Reading exercise: grouped pill layout not found', { tileCount });
+    return { status: 'unhandled' };
+  }
   logger.info('Reading exercise: starting', { tileCount });
 
   // A question is done when every option on it is locked (Mui-disabled) —
@@ -257,32 +253,31 @@ async function main(existingDriver) {
   for (let pass = 0; pass < MAX_PASSES; pass += 1) {
     let answeredThisPass = 0;
 
-    for (let n = 1; n <= tileCount; n += 1) {
-      await clickTile(driver, n);
+    for (const n of pills) {
+      await clickPill(driver, n);
       await driver.sleep(800);
 
       if ((await countEnabledOptions(driver)) === 0) continue; // all locked = correct
 
       // Branch on the question's own UI: a "Check My Answer" button grades one
       // option at a time in place, so cycle it to a correct answer without
-      // leaving the question. Otherwise it's a deferred "Save & Next" item —
-      // fall back to the blocking method (answer, advance, revisit wrongs on a
-      // later pass; correctness comes from the option lock).
+      // leaving the question. Deferred items are evaluated by leaving via a
+      // numbered pill, then revisiting on a later pass to observe the lock.
       if (await hasCheckButton(driver)) {
         const outcome = await answerCheckQuestion(driver);
         answeredThisPass += 1;
         await driver.sleep(600);
+        await leaveByNextPill(driver, pills, n);
         logger.info('Reading exercise: check question', { pass, tile: n, outcome });
         continue;
       }
 
-      const acted = await answerOpenGroups(driver, Object.fromEntries([...TRIED].map(([k, v]) => [k, [...v]])));
+      const acted = await answerOpenGroups(driver, tried, n);
       if (acted.length === 0) continue;
 
       answeredThisPass += acted.length;
       await driver.sleep(400);
-      await gradeCurrent(driver);
-      await driver.sleep(1100);
+      await leaveByNextPill(driver, pills, n);
       logger.info('Reading exercise: answered', { pass, tile: n, groups: acted.length, letters: acted.map((a) => a.letter) });
     }
 
@@ -313,4 +308,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { run: main };
+module.exports = { run: main, readPills, clickPill, leaveByNextPill, answerOpenGroups };
