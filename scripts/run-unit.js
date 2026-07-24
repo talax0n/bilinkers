@@ -159,17 +159,71 @@ async function detectMode(driver) {
 
 const RUNNERS = { exercise: runExercise, iframe: runIframeExercise, reading: runReadingExercise };
 
+// Non-quiz rows (video, reading material / Bee Notes) have no gate and no
+// questions — they complete just by being viewed. A video only counts once it
+// reaches the end, so any <video> on the page (top-level or inside an iframe)
+// is muted and seeked to its final moment, then played so the player fires
+// its "ended" progress event. Static content (notes) needs nothing beyond the
+// open the caller already did. Returns 'video' | 'static'.
+const SEEK_VIDEOS = `
+  const vids = [...document.querySelectorAll('video')];
+  vids.forEach((v) => {
+    try {
+      v.muted = true;
+      if (isFinite(v.duration) && v.duration > 0) v.currentTime = Math.max(0, v.duration - 0.25);
+      const p = v.play();
+      if (p && p.catch) p.catch(() => {});
+    } catch (e) {}
+  });
+  return vids.length;
+`;
+
+async function completeMediaActivity(driver) {
+  await driver.switchTo().defaultContent();
+  let seeked = await driver.executeScript(SEEK_VIDEOS);
+  if (seeked === 0) {
+    const iframes = await driver.findElements(By.css('iframe'));
+    for (const frame of iframes) {
+      await driver.switchTo().frame(frame);
+      seeked += await driver.executeScript(SEEK_VIDEOS);
+      await driver.switchTo().defaultContent();
+      if (seeked > 0) break;
+    }
+  }
+  if (seeked > 0) {
+    // Let the last fraction of a second play out so "ended" fires and the
+    // platform records the view.
+    await driver.sleep(4000);
+    return 'video';
+  }
+  // Static reading material / notes — opening it is enough to mark it viewed.
+  await driver.sleep(1500);
+  return 'static';
+}
+
 async function main() {
   const driver = await attachToBrave();
   const unitUrl = await driver.getCurrentUrl();
 
+  // Titles we've already opened this run. A row that can't be auto-completed
+  // (an unsupported activity, or a video/notes the platform didn't mark done)
+  // must not be re-picked forever — once attempted, it's skipped so the loop
+  // can move on or finish instead of spinning on the same row.
+  const attempted = new Set();
+
   for (;;) {
     const rows = await readRows(driver);
-    const next = rows.find((r) => !r.disabled && !r.completed);
+    const next = rows.find((r) => !r.disabled && !r.completed && !attempted.has(r.title));
     if (!next) {
-      logger.info('No unfinished activities left in this unit — done', { total: rows.length });
+      const stuck = rows.filter((r) => !r.disabled && !r.completed).map((r) => r.title);
+      if (stuck.length) {
+        logger.warn('Remaining activities could not be auto-completed — done', { stuck });
+      } else {
+        logger.info('No unfinished activities left in this unit — done', { total: rows.length });
+      }
       break;
     }
+    attempted.add(next.title);
 
     logger.info('Opening activity', { title: next.title });
     const beforeUrl = await driver.getCurrentUrl();
@@ -193,11 +247,11 @@ async function main() {
 
     const mode = await detectMode(driver);
     if (!mode) {
-      // Rows like the intro video or Bee Notes aren't quizzes this bot
-      // knows how to drive — skip past them instead of aborting the whole
-      // unit run, since they don't block later rows from unlocking once
-      // marked viewed by hand.
-      logger.warn('Not an automatable activity type (video/reading material?) — skipping', { title: next.title });
+      // Not a quiz — a video or static reading material / notes. Complete it
+      // by viewing: videos are seeked to the end, notes just need the open.
+      const kind = await completeMediaActivity(driver);
+      logger.info('Completed media activity', { title: next.title, kind });
+      await driver.switchTo().defaultContent();
       await driver.get(unitUrl);
       await driver.sleep(1500);
       continue;
