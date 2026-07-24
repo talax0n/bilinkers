@@ -13,11 +13,16 @@ const name = 'vocabularyIntro';
 // their post-answer Continue button, just hidden (style="display:none")
 // until answered — so matching on the href alone previously misfired on
 // real questions and skipped them unanswered. Excluding known quiz markers
-// closes that gap.
+// closes that gap. The quiz-matching check mirrors quizMatching.detect's
+// full condition (not a bare `includes('quiz-matching')`) because intro
+// slides embed the whole activity's quiz manifest as JSON — which contains
+// literal "quiz-matching-N" IDs for quizzes elsewhere in the unit — so a
+// bare substring check false-positived on intro slides too.
 function detect(dom) {
   if (!dom.insideIframe) return false;
   const html = dom.outerHTML;
-  if (html.includes('quiz-input-radio') || html.includes('quiz-input-sa') || html.includes('quiz-matching')) return false;
+  if (html.includes('quiz-input-radio') || html.includes('quiz-input-sa')) return false;
+  if (html.includes('quiz-matching') && html.includes('dropzone') && html.includes('draggable')) return false;
   return /href="#\/n"/.test(html);
 }
 
