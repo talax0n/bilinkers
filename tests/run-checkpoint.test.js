@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { run: runCheckpoint, waitForScore, ensurePillsExpanded } = require('../scripts/run-checkpoint');
+const { run: runCheckpoint, waitForScore, ensurePillsExpanded, answerAllQuestions } = require('../scripts/run-checkpoint');
 
 function makeDriver({ gateClickable = true } = {}) {
   const urls = ['https://lms.binus.ac.id/checkpoint-gate'];
@@ -115,4 +115,105 @@ test('ensurePillsExpanded clicks the checkpoint chevron and waits for more pills
 
   assert.equal(await ensurePillsExpanded(driver), true);
   assert.equal(clicks, 1);
+});
+
+test('answerAllQuestions uses only pill navigation and grades the final question by leaving its pill before submit', async () => {
+  const visits = [];
+  const submissions = [];
+  const answeredPills = [];
+  let activePill = null;
+  const driver = {
+    switchTo() { return { defaultContent: async () => {} }; },
+    async executeScript(code) {
+      if (code.includes("some((b) => !b.disabled)")) return activePill !== 2;
+      if (code.includes('primary-light-shade-color')) return [];
+      if (code.includes('Save & Next')) throw new Error('save button must never be queried');
+      if (code.includes("textContent.trim() === 'Save'")) throw new Error('save button must never be queried');
+      return false;
+    },
+  };
+
+  const result = await answerAllQuestions(driver, 'D', {
+    getCurrentQuestionDomFn: async () => ({ kind: 'fake-dom' }),
+    ensurePillsExpandedFn: async () => true,
+    readPillsFn: async () => [{ n: 1 }, { n: 2 }, { n: 3 }],
+    clickPillFn: async (_driver, n) => {
+      visits.push(n);
+      activePill = n;
+      return true;
+    },
+    waitForPillActiveFn: async (_driver, n) => activePill === n,
+    answerEveryGroupFn: async (_driver, letter) => {
+      answeredPills.push({ pill: activePill, letter });
+      return 1;
+    },
+    clickSubmitFn: async () => {
+      submissions.push([...visits]);
+      return true;
+    },
+    createRegistryFn: () => ({
+      register() {},
+      findHandler() { return { name: 'fake-handler' }; },
+    }),
+    logger: { info() {}, warn() {} },
+  });
+
+  assert.deepEqual(answeredPills, [
+    { pill: 1, letter: 'D' },
+    { pill: 3, letter: 'D' },
+  ]);
+  assert.deepEqual(visits, [1, 2, 3, 1]);
+  assert.deepEqual(submissions, [[1, 2, 3, 1]]);
+  assert.deepEqual(result, { status: 'answered', questionNum: 2 });
+});
+
+test('answerAllQuestions stops after bounded unanswered completion passes without submitting', async () => {
+  const visits = [];
+  const submissions = [];
+  let activePill = null;
+  let unansweredChecks = 0;
+  const warnings = [];
+  const driver = {
+    switchTo() { return { defaultContent: async () => {} }; },
+    async executeScript(code) {
+      if (code.includes("some((b) => !b.disabled)")) return true;
+      if (code.includes('primary-light-shade-color')) {
+        unansweredChecks += 1;
+        return unansweredChecks === 1 ? [2, 3] : [2, 3];
+      }
+      return false;
+    },
+  };
+
+  const result = await answerAllQuestions(driver, 'C', {
+    getCurrentQuestionDomFn: async () => ({ kind: 'fake-dom' }),
+    ensurePillsExpandedFn: async () => true,
+    readPillsFn: async () => [{ n: 1 }, { n: 2 }, { n: 3 }],
+    clickPillFn: async (_driver, n) => {
+      visits.push(n);
+      activePill = n;
+      return true;
+    },
+    waitForPillActiveFn: async (_driver, n) => activePill === n,
+    answerEveryGroupFn: async () => 1,
+    clickSubmitFn: async () => {
+      submissions.push('submit');
+      return true;
+    },
+    createRegistryFn: () => ({
+      register() {},
+      findHandler() { return { name: 'fake-handler' }; },
+    }),
+    logger: {
+      info() {},
+      warn(message, data) { warnings.push({ message, data }); },
+    },
+    maxCompletionPasses: 3,
+  });
+
+  assert.deepEqual(result, { status: 'unhandled', questionNum: 6 });
+  assert.deepEqual(submissions, []);
+  assert.equal(unansweredChecks, 2);
+  assert.deepEqual(visits, [1, 2, 3, 1, 2, 3]);
+  assert.equal(warnings.some(({ message, data }) => message.includes('made no progress') && Array.isArray(data.unanswered)), true);
 });

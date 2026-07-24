@@ -67,35 +67,6 @@ async function clickGateButton(driver, timeoutMs = 8000) {
   return false;
 }
 
-// A checkpoint's per-question nav is "Save & Next" (verified live — not
-// "Next", which goToNextQuestion() looks for, and not a bare pill click,
-// which navigates without persisting the just-picked option since pills are
-// for jumping/review, not saving).
-async function clickSaveAndNext(driver) {
-  await driver.switchTo().defaultContent();
-  return driver.executeScript(`
-    const buttons = Array.from(document.querySelectorAll('button'));
-    const btn = buttons.find((b) => b.textContent.trim() === 'Save & Next');
-    if (btn && !btn.disabled) { btn.click(); return true; }
-    return false;
-  `);
-}
-
-// The filtered "only-incorrect" retry attempts label the per-question nav
-// button plain "Save" instead of "Save & Next" (verified live: clicking it
-// advances exactly like "Save & Next" on a full attempt) — so the
-// brute-force loop needs this fallback, otherwise it stalls on question 1 of
-// every retry round waiting for a "Save & Next" that never appears.
-async function clickSaveButton(driver) {
-  await driver.switchTo().defaultContent();
-  return driver.executeScript(`
-    const buttons = Array.from(document.querySelectorAll('button'));
-    const btn = buttons.find((b) => b.textContent.trim() === 'Save');
-    if (btn && !btn.disabled) { btn.click(); return true; }
-    return false;
-  `);
-}
-
 // The last question has no "Save & Next" — instead it shows a per-question
 // "Save" *and* a checkpoint-wide "Submit" side by side (verified live).
 // "Save" only re-saves the current selection without finalizing anything —
@@ -257,101 +228,118 @@ async function answerEveryGroup(driver, letter) {
   );
 }
 
-// Persists the current selection. This checkpoint labels the button "Save"
-// (retry rounds) or "Save & Next" (full round); either just saves — navigation
-// is driven by clicking pills, not by these, because "Save"'s own next-jump is
-// erratic (verified live: it skipped 3 -> 27, leaving 4..26 unanswered).
-async function saveCurrent(driver) {
-  return (await clickSaveAndNext(driver)) || (await clickSaveButton(driver));
-}
-
-async function waitForPillSaved(driver, n, timeoutMs = 20000) {
-  await ensurePillsExpanded(driver);
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const saved = await driver.executeScript(
-      `
-      const target = String(arguments[0]);
-      const pill = [...document.querySelectorAll('.bl-button__container')].find((el) => el.textContent.trim() === target);
-      return pill?.classList.contains('primary-shade-color') || /Your Score:\s*\d+/.test(document.body.textContent) || location.pathname.includes('/result/');
-    `,
-      String(n)
-    );
-    if (saved) return true;
-    await driver.sleep(100);
-  }
-  return false;
-}
-
 // Brute-forces one checkpoint attempt with a single fixed letter. Navigation
-// is by clicking each numbered pill 1..N directly (NOT by "Save & Next", whose
-// jump order is erratic here) so every question is actually visited. A pill
-// whose options are all locked is already correct from a previous attempt —
-// skipped, so its correct answer is preserved while only still-wrong questions
-// get the new letter.
-async function answerAllQuestions(driver, letter) {
-  const registry = createRegistry();
+// is by clicking each numbered pill 1..N directly, using the next pill change
+// itself as the grading/navigation event. A pill whose options are all locked is
+// already correct from a previous attempt — skipped, so its correct answer is
+// preserved while only still-wrong questions get the new letter. The last pill
+// is graded by leaving it for another available pill before Submit, because the
+// pill transition is what locks the answer.
+async function answerAllQuestions(
+  driver,
+  letter,
+  {
+    createRegistryFn = createRegistry,
+    getCurrentQuestionDomFn = getCurrentQuestionDom,
+    ensurePillsExpandedFn = ensurePillsExpanded,
+    readPillsFn = readPills,
+    clickPillFn = clickPill,
+    waitForPillActiveFn = waitForPillActive,
+    answerEveryGroupFn = answerEveryGroup,
+    clickSubmitFn = clickSubmit,
+    logger: injectedLogger = logger,
+    maxCompletionPasses = 3,
+  } = {}
+) {
+  const registry = createRegistryFn();
   registry.register(audioMultipleChoice);
   registry.register(readingComprehension);
 
-  await getCurrentQuestionDom(driver);
-  await ensurePillsExpanded(driver);
-  const pills = await readPills(driver);
+  await getCurrentQuestionDomFn(driver);
+  await ensurePillsExpandedFn(driver);
+  const pills = await readPillsFn(driver);
   if (pills.length === 0) {
-    logger.warn('Checkpoint: no nav pills found — stopping', {});
+    injectedLogger.warn('Checkpoint: no nav pills found — stopping', {});
     return { status: 'unhandled', questionNum: 0 };
   }
-  logger.info('Checkpoint attempt: answering questions', { pills: pills.length, letter });
+  injectedLogger.info('Checkpoint attempt: answering questions', { pills: pills.length, letter });
 
   let answered = 0;
-  for (const { n } of pills) {
-    await ensurePillsExpanded(driver);
-    if (!(await clickPill(driver, n)) || !(await waitForPillActive(driver, n))) {
-      logger.warn('Checkpoint: pill navigation did not settle — stopping', { pill: n });
+  let previousUnanswered = null;
+
+  for (let completionPass = 1; completionPass <= maxCompletionPasses; completionPass += 1) {
+    for (const { n } of pills) {
+      await ensurePillsExpandedFn(driver);
+      if (!(await clickPillFn(driver, n)) || !(await waitForPillActiveFn(driver, n))) {
+        injectedLogger.warn('Checkpoint: pill navigation did not settle — stopping', { pill: n });
+        return { status: 'unhandled', questionNum: answered };
+      }
+
+      // Checkpoint questions render top-level (no iframe), so don't burn the
+      // default 8s iframe wait on every pill.
+      const dom = await getCurrentQuestionDomFn(driver, { iframeWaitMs: 600 });
+      const handler = registry.findHandler(dom);
+      if (!handler) {
+        injectedLogger.warn('Checkpoint: unhandled question type — skipping pill', { pill: n });
+        continue;
+      }
+
+      const enabled = await driver.executeScript(`return [...document.querySelectorAll('button.bl-w-full.justify-content-start')].some((b) => !b.disabled)`);
+      if (!enabled) continue; // already correct (locked) — leave it, preserve the earlier letter
+
+      try {
+        const selected = await answerEveryGroupFn(driver, letter);
+        if (selected === 0) throw new Error(`no option button found for letter "${letter}"`);
+        answered += 1;
+        injectedLogger.info('Checkpoint question answered', { pill: n, type: handler.name, letter, selected, completionPass });
+      } catch (err) {
+        // Fewer options than the current letter (e.g. a 3-option TFNG on a "D"
+        // round) — it can't still be unresolved this late, so it's effectively
+        // already correct; leave it.
+        injectedLogger.info('Checkpoint question has no option for letter — skipping', { pill: n, letter, error: err.message, completionPass });
+      }
+    }
+
+    await ensurePillsExpandedFn(driver);
+    const unanswered = await driver.executeScript(`
+      return [...document.querySelectorAll('.bl-button__container')]
+        .filter((pill) => /^\\d{1,2}$/.test(pill.textContent.trim()) && pill.classList.contains('primary-light-shade-color'))
+        .map((pill) => Number(pill.textContent.trim()));
+    `);
+    if (unanswered.length === 0) break;
+
+    injectedLogger.warn('Checkpoint: unanswered pills remain after completion pass', { unanswered, completionPass, maxCompletionPasses });
+    if (previousUnanswered && unanswered.length >= previousUnanswered.length) {
+      injectedLogger.warn('Checkpoint: unanswered pills made no progress — stopping', {
+        unanswered,
+        previousUnanswered,
+        completionPass,
+      });
       return { status: 'unhandled', questionNum: answered };
     }
+    previousUnanswered = unanswered;
 
-    // Checkpoint questions render top-level (no iframe), so don't burn the
-    // default 8s iframe wait on every pill.
-    const dom = await getCurrentQuestionDom(driver, { iframeWaitMs: 600 });
-    const handler = registry.findHandler(dom);
-    if (!handler) {
-      logger.warn('Checkpoint: unhandled question type — skipping pill', { pill: n });
-      continue;
+    if (completionPass === maxCompletionPasses) {
+      injectedLogger.warn('Checkpoint: unanswered pills remain after max completion passes — stopping', {
+        unanswered,
+        completionPass,
+        maxCompletionPasses,
+      });
+      return { status: 'unhandled', questionNum: answered };
     }
-
-    const enabled = await driver.executeScript(`return [...document.querySelectorAll('button.bl-w-full.justify-content-start')].some((b) => !b.disabled)`);
-    if (!enabled) continue; // already correct (locked) — leave it, preserve the earlier letter
-
-    try {
-      const selected = await answerEveryGroup(driver, letter);
-      if (selected === 0) throw new Error(`no option button found for letter "${letter}"`);
-      answered += 1;
-      logger.info('Checkpoint question answered', { pill: n, type: handler.name, letter, selected });
-    } catch (err) {
-      // Fewer options than the current letter (e.g. a 3-option TFNG on a "D"
-      // round) — it can't still be unresolved this late, so it's effectively
-      // already correct; leave it.
-      logger.info('Checkpoint question has no option for letter — skipping', { pill: n, letter, error: err.message });
-    }
-    await saveCurrent(driver);
-    if (!(await waitForPillSaved(driver, n))) logger.warn('Checkpoint: answer not yet persisted — completion pass will retry', { pill: n });
   }
 
-  await ensurePillsExpanded(driver);
-  const unanswered = await driver.executeScript(`
-    return [...document.querySelectorAll('.bl-button__container')]
-      .filter((pill) => /^\\d{1,2}$/.test(pill.textContent.trim()) && pill.classList.contains('primary-light-shade-color'))
-      .map((pill) => Number(pill.textContent.trim()));
-  `);
-  if (unanswered.length > 0) {
-    logger.warn('Checkpoint: unanswered pills remain — retrying attempt pass', { unanswered });
-    return answerAllQuestions(driver, letter);
+  if (pills.length > 1) {
+    const finalPill = pills[pills.length - 1].n;
+    const gradingPill = pills[0].n === finalPill ? pills[1].n : pills[0].n;
+    await ensurePillsExpandedFn(driver);
+    if (!(await clickPillFn(driver, gradingPill)) || !(await waitForPillActiveFn(driver, gradingPill))) {
+      injectedLogger.warn('Checkpoint: final grading pill transition did not settle — stopping', { from: finalPill, to: gradingPill });
+      return { status: 'unhandled', questionNum: answered };
+    }
   }
 
-  // Some checkpoints auto-grade after the final Save; others render Submit.
-  // clickSubmit no-ops for the auto-grade variant.
-  await clickSubmit(driver);
+  await clickSubmitFn(driver);
   return { status: 'answered', questionNum: answered };
 }
 
@@ -415,4 +403,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { run: main, waitForScore, ensurePillsExpanded, attachToBrave, clickGateButton, clickSaveAndNext, clickSubmit };
+module.exports = { run: main, waitForScore, ensurePillsExpanded, attachToBrave, clickGateButton, clickSubmit, answerAllQuestions };
