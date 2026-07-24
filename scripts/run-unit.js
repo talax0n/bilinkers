@@ -4,6 +4,7 @@ const { resolveChromedriverPath } = require('../src/chromedriver');
 const logger = require('../src/logger');
 const { run: runExercise } = require('./run-exercise');
 const { run: runIframeExercise } = require('./run-iframe-exercise');
+const { run: runReadingExercise } = require('./run-reading-exercise');
 
 // This script attaches to an already-running Chromium-based browser (Chrome,
 // Brave, Edge) launched with --remote-debugging-port=9222, and drives a
@@ -137,14 +138,26 @@ async function detectMode(driver) {
     await driver.sleep(200);
     iframes = await driver.findElements(By.css('iframe'));
   }
-  if (iframes.length > 0) return 'iframe';
+  if (iframes.length > 0) {
+    // Two different activities live inside an iframe: the Bits/LTI player
+    // (quiz-input-* markup, or a #/n slide-nav link) is 'iframe'; a reading
+    // BlExercise (passage + numbered tiles + MUI 'bl-w-full
+    // justify-content-start' option buttons) is 'reading'. Look inside to
+    // tell them apart — treating every iframe as 'iframe' ran the wrong
+    // runner on reading exercises.
+    await driver.switchTo().frame(iframes[0]);
+    const iframeHtml = await driver.executeScript('return document.documentElement.outerHTML');
+    await driver.switchTo().defaultContent();
+    if (iframeHtml.includes('bl-w-full justify-content-start')) return 'reading';
+    return 'iframe';
+  }
 
   const topHtml = await driver.executeScript('return document.documentElement.outerHTML');
   if (topHtml.includes('bl-w-full justify-content-start')) return 'exercise';
   return null;
 }
 
-const RUNNERS = { exercise: runExercise, iframe: runIframeExercise };
+const RUNNERS = { exercise: runExercise, iframe: runIframeExercise, reading: runReadingExercise };
 
 async function main() {
   const driver = await attachToBrave();
