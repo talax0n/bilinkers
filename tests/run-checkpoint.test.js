@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { run: runCheckpoint, waitForScore } = require('../scripts/run-checkpoint');
+const { run: runCheckpoint, waitForScore, ensurePillsExpanded } = require('../scripts/run-checkpoint');
 
 function makeDriver({ gateClickable = true } = {}) {
   const urls = ['https://lms.binus.ac.id/checkpoint-gate'];
@@ -47,16 +47,16 @@ test('stops immediately on an unhandled question type, without retrying', async 
   assert.equal(calls, 1);
 });
 
-test('gives up after 5 attempts without reaching 100', async () => {
+test('keeps retrying past the old 5-attempt cap until it passes', async () => {
   const driver = makeDriver();
   let calls = 0;
   const runExerciseFn = async () => {
     calls += 1;
-    return { status: 'complete', questionNum: 30, score: 90 };
+    return calls < 8 ? { status: 'complete', questionNum: 30, score: 90 } : { status: 'complete', questionNum: 30, score: 100 };
   };
   const result = await runCheckpoint(driver, { runExerciseFn });
-  assert.deepEqual(result, { status: 'exhausted', attempts: 5 });
-  assert.equal(calls, 5);
+  assert.deepEqual(result, { status: 'passed', attempt: 8, score: 100 });
+  assert.equal(calls, 8);
 });
 
 // clickGateButton polls a real 8s wall-clock deadline (matches
@@ -95,4 +95,24 @@ test('waitForScore resolves undefined if the score never appears within the time
   };
   const score = await waitForScore(driver, 50);
   assert.equal(score, undefined);
+});
+
+test('ensurePillsExpanded clicks the checkpoint chevron and waits for more pills', async () => {
+  let pillCount = 15;
+  let clicks = 0;
+  const driver = {
+    switchTo() { return { defaultContent: async () => {} }; },
+    async sleep() {},
+    async executeScript(code) {
+      if (code.includes("path.startsWith('M16.59 8.59L12 13.17')")) {
+        clicks += 1;
+        pillCount = 30;
+        return true;
+      }
+      return Array.from({ length: pillCount }, (_, index) => ({ n: index + 1 }));
+    },
+  };
+
+  assert.equal(await ensurePillsExpanded(driver), true);
+  assert.equal(clicks, 1);
 });
