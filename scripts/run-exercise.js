@@ -22,10 +22,12 @@ const logger = require('../src/logger');
 // fails for your setup.
 const CHROMEDRIVER_PATH = process.env.CHROMEDRIVER_PATH;
 
-// audioMultipleChoice can't be answered intelligently (the bot can't hear the
-// audio), so it cycles every option until Check reports correct instead of
-// trusting an LLM guess.
-const BLAST_TYPES = new Set(['audioMultipleChoice']);
+// These cycle every option until Check reports correct instead of trusting an
+// LLM guess: audioMultipleChoice can't be answered intelligently (the bot
+// can't hear the audio), and readingComprehension has few options (A-D) with
+// in-place Check feedback, so exhausting them is cheaper and more reliable
+// than an LLM call.
+const BLAST_TYPES = new Set(['audioMultipleChoice', 'readingComprehension']);
 
 async function attachToBrave() {
   const options = new chrome.Options();
