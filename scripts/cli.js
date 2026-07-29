@@ -10,7 +10,7 @@ const { isGroupedReadingLayout, groupedReadingLayoutFromDocument } = require('./
 
 // One-command entry point: launches your Chromium-based browser with remote
 // debugging on, waits for you to log in and open the exercise, then runs the
-// matching bot script. Usage: node scripts/cli.js [exercise|iframe|unit|checkpoint] [url]
+// matching bot script. Usage: node scripts/cli.js [exercise|iframe|unit|checkpoint|course] [url]
 // Mode is optional — if omitted, it's auto-detected from the page after you
 // press Enter (the native MUI exercise, an LTI-embedded iframe activity, and
 // a unit's own activity list all have distinct, unambiguous DOM markers), so
@@ -38,6 +38,7 @@ const MODES = {
   reading: '../scripts/run-reading-exercise.js',
   checkpoint: '../scripts/run-checkpoint.js',
   'checkpoint-capture': '../scripts/run-checkpoint-capture.js',
+  course: '../scripts/run-course.js',
 };
 
 function resolveBinaryPath() {
@@ -152,6 +153,19 @@ async function detectMode() {
     `);
     if (isCheckpointGate) {
       return 'checkpoint';
+    }
+
+    // A course's roadmap (the isometric city map: "Unit 1", "Checkpoint 1",
+    // ... hexagon nodes) renders each node as a rasterized PNG inside a
+    // '.hoverable-pointer' div with a plain-text label sibling — unique to
+    // this page, not shared with the unit/exercise/checkpoint chrome.
+    const isCourseMap = await driver.executeScript(`
+      return [...document.querySelectorAll('.hoverable-pointer')].some((el) =>
+        /^(Unit|Checkpoint)\\d+$/i.test(el.textContent.replace(/\\s+/g, '').trim())
+      );
+    `);
+    if (isCourseMap) {
+      return 'course';
     }
 
     const topLevelLayout = await driver.executeScript(`return (${groupedReadingLayoutFromDocument.toString()})()`);
