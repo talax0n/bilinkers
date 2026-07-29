@@ -27,6 +27,10 @@ const CHROMEDRIVER_PATH = process.env.CHROMEDRIVER_PATH;
 // scores forever — only an unhandled question type (a structural gap, not
 // an unlucky guess) stops the loop early.
 
+// Per-pill brute-force letters cycle A..F so elimination stays unbounded
+// (unlimited attempts) even in the unlikely event it hasn't converged by F.
+const LETTERS = ['A', 'B', 'C', 'D', 'E', 'F'];
+
 async function attachToBrave() {
   const options = new chrome.Options();
   options.debuggerAddress('localhost:9222');
@@ -122,13 +126,13 @@ async function waitForScore(driver, timeoutMs = 10000) {
 // Checkpoints never show a per-question "Correct!"/"Incorrect!" heading, only
 // a final score after submitting everything — so there's no live signal to
 // brute-force a question in place. Instead it's brute-forced ACROSS attempts:
-// answer every presented question with a single fixed letter, submit, and the
-// platform re-presents only the still-incorrect ones on the next attempt
-// (verified live). So attempt 1 answers all "A", attempt 2 answers the
-// remaining wrong ones all "B", then "C", then "D", ... — by elimination each
-// question is cleared by whichever letter is correct, with no LLM. No
-// per-question bookkeeping is needed: the platform's "only re-present the
-// wrong ones" behaviour is what makes a fixed letter per attempt converge.
+// answer every still-wrong pill, submit, and the platform re-presents (via
+// isPillLocked, not disappearance — a checkpoint keeps showing every pill,
+// just locks the correct ones) only the still-incorrect ones as editable on
+// the next attempt (verified live). Each pill cycles its OWN letter
+// (A, B, C, ...) independently rather than one letter shared by the whole
+// attempt — see answerAllQuestions for why a shared letter can't solve
+// clustered vocabulary questions. No LLM involved either way.
 // Reads the checkpoint's numbered nav pills (1..N). Every pill is a
 // '.bl-button__container' with a numeric label — keyed off that class (not a
 // set of background colours) so pills in any state are counted, including the
@@ -197,6 +201,24 @@ async function clickPill(driver, n) {
   );
 }
 
+// Locked (already-correct) pills carry 'success-shade-color' and never gain
+// 'secondary-shade-color' when clicked — the app apparently doesn't render
+// into an already-locked question, so waitForPillActive can never succeed
+// for one (verified live: clicking an already-correct pill left it
+// success-shade-color, no active-state transition, yet nothing was actually
+// stuck). Checked before navigating so locked pills are skipped outright
+// instead of being treated as a failed pill transition.
+async function isPillLocked(driver, n) {
+  return driver.executeScript(
+    `
+    const target = String(arguments[0]);
+    const pill = [...document.querySelectorAll('.bl-button__container')].find((el) => el.textContent.trim() === target);
+    return pill?.classList.contains('success-shade-color') || false;
+  `,
+    String(n)
+  );
+}
+
 async function waitForPillActive(driver, n, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -215,6 +237,48 @@ async function waitForPillActive(driver, n, timeoutMs = 5000) {
   return false;
 }
 
+// Clicking a pill to advance was found to occasionally leave the just-answered
+// question unsaved (Submit at question 30 not reflecting it) — so an explicit
+// Save is now fired after every answer too, on top of the pill navigation,
+// belt-and-suspenders. Matches "Save" or "Save & Next" (label varies by
+// attempt type), never "Submit" (only the checkpoint-wide Submit finalizes).
+async function clickSaveButton(driver) {
+  await driver.switchTo().defaultContent();
+  return driver.executeScript(`
+    const buttons = Array.from(document.querySelectorAll('button'));
+    const btn = buttons.find((b) => {
+      const t = b.textContent.trim();
+      return t === 'Save' || t === 'Save & Next';
+    });
+    if (btn && !btn.disabled) { btn.click(); return true; }
+    return false;
+  `);
+}
+
+// Save fires a network call; clicking the next pill before it lands can get
+// swallowed by the save's own re-render (verified live: pill navigation then
+// stalls on some later, unrelated pill — a race, not a fixed bad pill). Poll
+// until the just-saved pill drops its "unanswered" marker
+// (primary-light-shade-color, same class the completion-pass check below
+// uses) before moving on, so navigation only ever starts once the save has
+// actually landed.
+async function waitForPillSaved(driver, n, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const saved = await driver.executeScript(
+      `
+      const target = String(arguments[0]);
+      const pill = [...document.querySelectorAll('.bl-button__container')].find((el) => el.textContent.trim() === target);
+      return pill ? !pill.classList.contains('primary-light-shade-color') : false;
+    `,
+      String(n)
+    );
+    if (saved) return true;
+    await driver.sleep(100);
+  }
+  return false;
+}
+
 async function answerEveryGroup(driver, letter) {
   return driver.executeScript(
     `
@@ -228,24 +292,40 @@ async function answerEveryGroup(driver, letter) {
   );
 }
 
-// Brute-forces one checkpoint attempt with a single fixed letter. Navigation
-// is by clicking each numbered pill 1..N directly, using the next pill change
-// itself as the grading/navigation event. A pill whose options are all locked is
-// already correct from a previous attempt — skipped, so its correct answer is
-// preserved while only still-wrong questions get the new letter. The last pill
-// is graded by leaving it for another available pill before Submit, because the
-// pill transition is what locks the answer.
+// Brute-forces one checkpoint attempt. Navigation is by clicking each
+// numbered pill 1..N directly; each answer is locked in with an explicit
+// Save click right after selecting it (relying on the pill transition alone
+// to save was found to sometimes drop question 30's answer before Submit).
+// A pill whose options are all locked is already correct from a previous
+// attempt — skipped, so its correct answer is preserved.
+//
+// Each pill gets its OWN letter, tracked independently in `pillLetters` (a
+// Map<pillNumber, letterIndex> owned and persisted across attempts by the
+// caller) — NOT one shared letter for every pill this attempt. A single
+// global letter was the original design (see git history), but verified
+// live it can never solve a "vocabulary in context" cluster: several blanks
+// in the same passage sharing one candidate word pool (e.g. seven relative-
+// pronoun blanks all offering the same five who/when/where/which/that
+// options). Forcing every blank in that cluster to the same letter each
+// attempt satisfies at most one of them at a time — a real checkpoint
+// plateaued at 60%/12-unresolved-pills for 27 straight attempts (3+ full
+// A-F cycles with zero change) before this fix. Independent per-pill letters
+// let each blank's own elimination converge regardless of what its cluster-
+// mates are doing this attempt.
 async function answerAllQuestions(
   driver,
-  letter,
+  pillLetters,
   {
     createRegistryFn = createRegistry,
     getCurrentQuestionDomFn = getCurrentQuestionDom,
     ensurePillsExpandedFn = ensurePillsExpanded,
     readPillsFn = readPills,
     clickPillFn = clickPill,
+    isPillLockedFn = isPillLocked,
     waitForPillActiveFn = waitForPillActive,
     answerEveryGroupFn = answerEveryGroup,
+    clickSaveButtonFn = clickSaveButton,
+    waitForPillSavedFn = waitForPillSaved,
     clickSubmitFn = clickSubmit,
     logger: injectedLogger = logger,
     maxCompletionPasses = 3,
@@ -256,21 +336,99 @@ async function answerAllQuestions(
   registry.register(readingComprehension);
 
   await getCurrentQuestionDomFn(driver);
-  await ensurePillsExpandedFn(driver);
-  const pills = await readPillsFn(driver);
+  // The gate's Continue click can land the attempt page before its pills
+  // have rendered — verified live: a single fixed post-click sleep found
+  // zero pills, while re-checking a couple seconds later on the same
+  // (already-navigated) page found 25+. Polled here instead of one fixed
+  // wait, so a slow render doesn't get misread as "no gate/no questions".
+  let pills = [];
+  let reloaded = false;
+  for (;;) {
+    const pillsDeadline = Date.now() + 8000;
+    while (Date.now() < pillsDeadline) {
+      await ensurePillsExpandedFn(driver);
+      pills = await readPillsFn(driver);
+      if (pills.length > 0) break;
+      await driver.sleep(300);
+    }
+    if (pills.length > 0 || reloaded) break;
+
+    // Distinct from slow rendering: the LMS occasionally serves "Failed to
+    // load Assessment type / Please contact Beelingua Support" instead of
+    // the attempt (verified live after resuming an in-progress attempt) — a
+    // plain page reload cleared it and the pills rendered normally. Only
+    // retried once; a second failure is a real problem, not a glitch.
+    const failedToLoad = await driver.executeScript(`return document.body.innerText.includes('Failed to load Assessment type')`);
+    if (!failedToLoad) break;
+    injectedLogger.warn('Checkpoint: page failed to load the assessment — reloading once', {});
+    await driver.navigate().refresh();
+    await driver.sleep(2000);
+    reloaded = true;
+  }
   if (pills.length === 0) {
     injectedLogger.warn('Checkpoint: no nav pills found — stopping', {});
     return { status: 'unhandled', questionNum: 0 };
   }
-  injectedLogger.info('Checkpoint attempt: answering questions', { pills: pills.length, letter });
+  injectedLogger.info('Checkpoint attempt: answering questions', { pills: pills.length });
 
   let answered = 0;
   let previousUnanswered = null;
+  // Every pill this attempt actually tries to answer uses the SAME letter
+  // for the whole attempt (reused across completion-pass re-visits — those
+  // exist to retry a save that didn't land in time, not to try a new
+  // letter), snapshotted here from the persistent per-pill state. Advanced
+  // in pillLetters (for every OTHER attempt to pick up) only once, after
+  // this attempt finishes.
+  // Pills that have been wrong on every attempt so far all advance their
+  // counter the same number of times (never having locked in to break the
+  // pattern) — if they all started from the same index 0, they stay in
+  // perfect lockstep forever, always trying the identical letter as each
+  // other on every single attempt. For an independent per-pill MCQ that's
+  // harmless. For a shared-pool cluster (verified live: 7 pills stuck at
+  // the same 5-6 options each, cycling A->B->C->...->A in unison for 49+
+  // attempts, score frozen dead flat at 77% the whole time) it's fatal:
+  // giving every cluster member the identical word every round guarantees
+  // a duplicate-use collision each time, so none of them can ever lock in,
+  // which keeps them synchronized, which repeats the collision forever.
+  // Staggering each pill's STARTING index by its own pill number means
+  // cluster-mates are never in lockstep to begin with — they naturally
+  // rotate through different relative letters every round instead. Plain
+  // `n % LETTERS.length` was tried first and verified live to still fail:
+  // pill 14 and pill 20 (exactly 6 apart) both landed on offset 2 and
+  // stayed locked together for 17+ more attempts flat at 93% — any LINEAR
+  // function of n mod 6 collides for every pair of pills spaced by a
+  // multiple of 6, no choice of coefficients avoids it. A real (non-linear)
+  // integer hash does, so pills 6 apart no longer trivially collide.
+  const startIndexFor = (n) => {
+    let h = n;
+    h = ((h >>> 16) ^ h) * 0x45d9f3b;
+    h = ((h >>> 16) ^ h) * 0x45d9f3b;
+    h = (h >>> 16) ^ h;
+    return Math.abs(h) % LETTERS.length;
+  };
+  const usedLetterIndex = new Map();
+  const letterFor = (n) => {
+    if (!usedLetterIndex.has(n)) {
+      usedLetterIndex.set(n, pillLetters.get(n) ?? startIndexFor(n));
+    }
+    return LETTERS[usedLetterIndex.get(n) % LETTERS.length];
+  };
 
   for (let completionPass = 1; completionPass <= maxCompletionPasses; completionPass += 1) {
     for (const { n } of pills) {
       await ensurePillsExpandedFn(driver);
-      if (!(await clickPillFn(driver, n)) || !(await waitForPillActiveFn(driver, n))) {
+      if (await isPillLockedFn(driver, n)) continue; // already correct — no click, no active-state to wait for
+
+      // A pill click occasionally doesn't register on the first try — same
+      // class of race as the Save/Submit clicks above (verified live: a
+      // pill reported "did not settle" mid-run, then answered normally on a
+      // plain re-click seconds later with nothing else changed). Retried
+      // once here before treating it as a genuine stall.
+      let settled = (await clickPillFn(driver, n)) && (await waitForPillActiveFn(driver, n));
+      if (!settled) {
+        settled = (await clickPillFn(driver, n)) && (await waitForPillActiveFn(driver, n));
+      }
+      if (!settled) {
         injectedLogger.warn('Checkpoint: pill navigation did not settle — stopping', { pill: n });
         return { status: 'unhandled', questionNum: answered };
       }
@@ -287,16 +445,25 @@ async function answerAllQuestions(
       const enabled = await driver.executeScript(`return [...document.querySelectorAll('button.bl-w-full.justify-content-start')].some((b) => !b.disabled)`);
       if (!enabled) continue; // already correct (locked) — leave it, preserve the earlier letter
 
+      const letter = letterFor(n);
       try {
         const selected = await answerEveryGroupFn(driver, letter);
         if (selected === 0) throw new Error(`no option button found for letter "${letter}"`);
+        await clickSaveButtonFn(driver);
+        await waitForPillSavedFn(driver, n);
         answered += 1;
         injectedLogger.info('Checkpoint question answered', { pill: n, type: handler.name, letter, selected, completionPass });
       } catch (err) {
-        // Fewer options than the current letter (e.g. a 3-option TFNG on a "D"
-        // round) — it can't still be unresolved this late, so it's effectively
-        // already correct; leave it.
-        injectedLogger.info('Checkpoint question has no option for letter — skipping', { pill: n, letter, error: err.message, completionPass });
+        // Fewer options than this pill's current letter (e.g. a 3-option
+        // TFNG on an "E" round for that specific pill) — its own letter
+        // still advances for next attempt below, same as if it had been
+        // tried and found wrong, so it keeps cycling toward one that exists.
+        injectedLogger.info('Checkpoint question has no option for this letter — will retry with the next letter next attempt', {
+          pill: n,
+          letter,
+          error: err.message,
+          completionPass,
+        });
       }
     }
 
@@ -309,62 +476,71 @@ async function answerAllQuestions(
     if (unanswered.length === 0) break;
 
     injectedLogger.warn('Checkpoint: unanswered pills remain after completion pass', { unanswered, completionPass, maxCompletionPasses });
+    // Neither case here is a structural gap (registry.findHandler already
+    // covers that, above) — it just means the current letter genuinely
+    // doesn't apply to whatever's left (e.g. a 3-option question on an "F"
+    // round). Previously this returned 'unhandled', which the outer
+    // attempt-retry loop in main() treats as fatal and stops the whole
+    // checkpoint — verified live: a checkpoint that was legitimately
+    // converging (score climbing 40 -> 60 across letters) got killed here
+    // on attempt 6 instead of submitting its partial answers and letting
+    // the next letter keep going. So this now just stops iterating passes
+    // and falls through to the normal Submit below, same as if every pill
+    // had resolved cleanly.
     if (previousUnanswered && unanswered.length >= previousUnanswered.length) {
-      injectedLogger.warn('Checkpoint: unanswered pills made no progress — stopping', {
+      injectedLogger.info('Checkpoint: unanswered pills made no progress this letter — submitting what is answered', {
         unanswered,
         previousUnanswered,
         completionPass,
       });
-      return { status: 'unhandled', questionNum: answered };
+      break;
     }
     previousUnanswered = unanswered;
 
     if (completionPass === maxCompletionPasses) {
-      injectedLogger.warn('Checkpoint: unanswered pills remain after max completion passes — stopping', {
+      injectedLogger.info('Checkpoint: unanswered pills remain after max completion passes — submitting what is answered', {
         unanswered,
         completionPass,
         maxCompletionPasses,
       });
-      return { status: 'unhandled', questionNum: answered };
+      break;
     }
   }
 
-  if (pills.length > 1) {
-    const finalPill = pills[pills.length - 1].n;
-    const gradingPill = pills[0].n === finalPill ? pills[1].n : pills[0].n;
-    await ensurePillsExpandedFn(driver);
-    if (!(await clickPillFn(driver, gradingPill)) || !(await waitForPillActiveFn(driver, gradingPill))) {
-      injectedLogger.warn('Checkpoint: final grading pill transition did not settle — stopping', { from: finalPill, to: gradingPill });
-      return { status: 'unhandled', questionNum: answered };
-    }
+  // Advance every pill actually tried this attempt to its next letter, so
+  // the next attempt (whether it turns out correct or not — correctness
+  // only becomes knowable via isPillLockedFn on the NEXT attempt) picks up
+  // where this one left off instead of retrying the same letter forever.
+  for (const [n, idx] of usedLetterIndex) {
+    pillLetters.set(n, idx + 1);
   }
 
   await clickSubmitFn(driver);
   return { status: 'answered', questionNum: answered };
 }
 
-async function runCheckpointAttempt(driver, letter) {
-  const answerResult = await answerAllQuestions(driver, letter);
+async function runCheckpointAttempt(driver, pillLetters) {
+  const answerResult = await answerAllQuestions(driver, pillLetters);
   if (answerResult.status === 'unhandled') {
     return { status: 'unhandled', questionNum: answerResult.questionNum };
   }
 
   const score = await waitForScore(driver);
-  logger.info('Checkpoint attempt graded', { questionNum: answerResult.questionNum, letter, score });
+  logger.info('Checkpoint attempt graded', { questionNum: answerResult.questionNum, score });
   return { status: 'complete', questionNum: answerResult.questionNum, score };
 }
-
-// Fixed letter per attempt; cycles A..F so retries stay unbounded (unlimited
-// attempts) even in the unlikely event elimination hasn't converged by F.
-const LETTERS = ['A', 'B', 'C', 'D', 'E', 'F'];
 
 async function main(existingDriver, { runExerciseFn = runCheckpointAttempt } = {}) {
   const driver = existingDriver || (await attachToBrave());
   const gateUrl = await driver.getCurrentUrl();
 
+  // Owned here, not per-attempt: each pill's letter must persist and
+  // advance across attempts (see answerAllQuestions), not reset every time
+  // the gate reloads.
+  const pillLetters = new Map();
+
   for (let attempt = 1; ; attempt += 1) {
-    const letter = LETTERS[(attempt - 1) % LETTERS.length];
-    logger.info('Starting checkpoint attempt', { attempt, letter });
+    logger.info('Starting checkpoint attempt', { attempt });
 
     const clicked = await clickGateButton(driver);
     if (!clicked) {
@@ -373,7 +549,7 @@ async function main(existingDriver, { runExerciseFn = runCheckpointAttempt } = {
     }
     await driver.sleep(1500);
 
-    const result = await runExerciseFn(driver, letter);
+    const result = await runExerciseFn(driver, pillLetters);
     logger.info('Checkpoint attempt finished', { attempt, ...result });
 
     if (result.status === 'unhandled') {
@@ -403,4 +579,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { run: main, waitForScore, ensurePillsExpanded, attachToBrave, clickGateButton, clickSubmit, answerAllQuestions };
+module.exports = { run: main, waitForScore, ensurePillsExpanded, attachToBrave, clickGateButton, clickSaveButton, waitForPillSaved, isPillLocked, clickSubmit, answerAllQuestions };
