@@ -66,6 +66,28 @@ async function clickContinue(driver) {
   `);
 }
 
+async function readActivityState(driver) {
+  return driver.executeScript(`
+    const text = document.querySelector('#content')?.innerText || '';
+    const question = text.match(/Question\\s+\\d+\\s+of\\s+\\d+/i)?.[0] || null;
+    return {
+      url: window.location.href,
+      question,
+      closing: text.includes('You can now close this activity'),
+    };
+  `);
+}
+
+async function waitForActivityChange(driver, previous, timeoutMs = 60000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const current = await readActivityState(driver);
+    if (current.closing || current.question !== previous.question) return current;
+    await driver.sleep(200);
+  }
+  return null;
+}
+
 // A wrong answer locks this activity's Check-once UI: the "Continue" link
 // stays hidden and re-checking doesn't re-evaluate. The only way forward is
 // the SPA's own hash router, which accepts direct navigation regardless of
@@ -83,16 +105,11 @@ async function goToNextQuestionByHash(driver) {
   return newUrl.includes(`#/question-${next}`);
 }
 
-async function advance(driver) {
+async function advance(driver, previousState, timeoutMs = 60000) {
   const advanced = await clickContinue(driver);
-  if (advanced) return true;
-  return goToNextQuestionByHash(driver);
+  if (advanced) return Boolean(await waitForActivityChange(driver, previousState, timeoutMs));
+  return false;
 }
-
-// Check re-evaluates on every click (verified live: cycling radio options and
-// re-clicking Check flips .correct.timeout/.incorrect.timeout each time), so
-// a wrong answer can be retried in place instead of restarting the activity.
-const MAX_ANSWER_RETRIES = 10;
 
 // vocabularyIntro pages aren't graded and have nothing to answer, so there's
 // no need to burn an LLM call on them — a no-op stands in for answerQuestion,
@@ -110,22 +127,54 @@ const SELF_ADVANCING_TYPES = new Set();
 const PRESENTATION_TYPES = new Set(['vocabularyIntro']);
 const noopAnswer = async () => ({});
 
-// errorAnalysis is answered by brute force instead of an LLM call: try A,
-// then B, then C, ... in order, one per retry, until Check passes. Simpler
-// and more reliable than reasoning about grammar through a model — there
-// are at most a handful of candidates, so exhausting them is cheap, and
-// runner.js's own retry loop (one attempt per call here) already drives
-// the "try next, check, repeat" sequence. A fresh instance per question
-// keeps the attempt counter from leaking across questions.
+// errorAnalysis is answered by brute force instead of an LLM call: try every
+// non-empty candidate-letter combination in increasing subset size (A, B,
+// ..., A+B, A+C, ...), one per retry, until Check passes. Simpler and more
+// reliable than reasoning about grammar through a model — there are at most
+// a handful of candidates, so exhausting them is cheap, and runner.js's own
+// retry loop (one attempt per call here) already drives the "try next,
+// check, repeat" sequence. A fresh instance per question keeps the attempt
+// counter from leaking across questions.
+function getLetterCombinations(letters) {
+  const combinations = [];
+
+  function build(startIndex, subsetSize, current) {
+    if (current.length === subsetSize) {
+      combinations.push([...current]);
+      return;
+    }
+
+    for (let i = startIndex; i <= letters.length - (subsetSize - current.length); i += 1) {
+      current.push(letters[i]);
+      build(i + 1, subsetSize, current);
+      current.pop();
+    }
+  }
+
+  for (let subsetSize = 1; subsetSize <= letters.length; subsetSize += 1) {
+    build(0, subsetSize, []);
+  }
+
+  return combinations;
+}
+
 function createBruteForceAnswerer() {
   let attemptIndex = 0;
+  let combinations = null;
+
   return async (client, model, instruction, questionData) => {
-    const candidate = questionData.candidates[attemptIndex];
-    attemptIndex += 1;
-    if (!candidate) {
-      throw new Error('errorAnalysis brute force: exhausted all candidate letters without a correct answer');
+    if (!combinations) {
+      combinations = getLetterCombinations(questionData.candidates.map((candidate) => candidate.letter));
     }
-    return { answer: candidate.letter };
+
+    const candidateLetters = combinations[attemptIndex];
+    attemptIndex += 1;
+
+    if (!candidateLetters) {
+      throw new Error('errorAnalysis brute force: exhausted all candidate-letter combinations without a correct answer');
+    }
+
+    return { answers: candidateLetters };
   };
 }
 const BRUTE_FORCE_TYPES = new Set(['errorAnalysis']);
@@ -149,6 +198,7 @@ async function main(existingDriver) {
   for (;;) {
     slideNum += 1;
     const dom = await getCurrentQuestionDom(driver);
+    const activityState = await readActivityState(dom.driver);
 
     // The activity's final slide ("You can now close this activity and
     // continue to the next one") has no #/n link and no quiz markers, so it
@@ -195,7 +245,7 @@ async function main(existingDriver) {
       llmClient,
       model: config.openai.model,
       instruction: buildInstruction(handler, questionData),
-      retryLimit: skipLlm ? 0 : MAX_ANSWER_RETRIES,
+      retryLimit: skipLlm ? 0 : config.retry.maxAnswerRetries,
       answerQuestionFn: bruteForce ? createBruteForceAnswerer() : skipLlm ? noopAnswer : answerQuestion,
     });
 
@@ -210,7 +260,7 @@ async function main(existingDriver) {
       continue;
     }
 
-    const advanced = await advance(dom.driver);
+    const advanced = await advance(dom.driver, activityState);
     if (!advanced) {
       logger.info('Could not advance (no Continue link, no next question hash) — activity complete', { questionNum });
       return { status: 'complete', questionNum };
@@ -226,4 +276,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { run: main };
+module.exports = { run: main, readActivityState, waitForActivityChange, advance, createBruteForceAnswerer };
