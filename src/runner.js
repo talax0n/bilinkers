@@ -1,4 +1,5 @@
 const { answerQuestion } = require('./llm');
+const logger = require('./logger');
 
 // LLM/proxy calls occasionally fail transiently (verified live: an
 // OpenAI-compatible proxy intermittently 403'd with a voucher/billing
@@ -54,6 +55,8 @@ async function processQuestion({
     }
     try {
       const llmResult = await callWithRetry(answerQuestionFn, [llmClient, model, instruction, questionData, feedback], driver);
+      const attemptedAnswer = llmResult.answer !== undefined ? llmResult.answer : llmResult.answers;
+      logger.info('Attempt: submitting answer', { handler: handler.name, attempt: attempts + 1, answer: attemptedAnswer });
       await handler.answer(driver, llmResult);
       const checkResult = await handler.checkResult(dom);
       // checkResult may be a bare outcome string, or { outcome, hint } when
@@ -64,6 +67,7 @@ async function processQuestion({
       if (outcome !== 'correct' && outcome !== 'incorrect') {
         throw new Error(`handler.checkResult returned unexpected value: ${JSON.stringify(checkResult)}`);
       }
+      logger.info('Attempt: result', { handler: handler.name, attempt: attempts + 1, answer: attemptedAnswer, outcome, hint: hint || undefined });
       if (outcome === 'incorrect') {
         const tried = llmResult.answer !== undefined ? [llmResult.answer] : llmResult.answers || [];
         tried.forEach((t) => {
@@ -75,6 +79,7 @@ async function processQuestion({
     } catch (err) {
       outcome = 'incorrect';
       feedback = `previous attempt failed with an error: ${err.message}`;
+      logger.warn('Attempt: failed with an error', { handler: handler.name, attempt: attempts + 1, error: err.message });
       attempts += 1;
       continue;
     }
