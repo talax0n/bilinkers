@@ -64,7 +64,7 @@ async function waitForLogin(driver, { pollMs, timeoutMs, postLoginSelector }) {
 // Re-checking (with fresh iframe lookups, since navigation happens inside
 // the iframe's own document rather than replacing the <iframe> element
 // itself) waits both out instead.
-async function getCurrentQuestionDom(driver, { iframeWaitMs = 8000, iframePollMs = 200, launcherWaitMs = 8000 } = {}) {
+async function getCurrentQuestionDom(driver, { iframeWaitMs = 30000, iframePollMs = 200, launcherWaitMs = 30000 } = {}) {
   await driver.switchTo().defaultContent();
 
   let iframes = await driver.findElements(By.css('iframe'));
@@ -80,9 +80,16 @@ async function getCurrentQuestionDom(driver, { iframeWaitMs = 8000, iframePollMs
     const launcherDeadline = Date.now() + launcherWaitMs;
     for (;;) {
       const notReady = await driver.executeScript(`
+        if (!document.documentElement || !document.body) return true;
+        if (document.body.innerText.includes('Do you want to continue from the page your last visited?')) {
+          const no = [...document.querySelectorAll('span')].find((el) => el.textContent.trim() === 'NO');
+          if (no) no.parentElement.click();
+          return true;
+        }
         if (document.getElementById('ltiForm')) return true;
         const content = document.getElementById('content');
-        return !!content && content.children.length === 0;
+        if (!content) return true;
+        return content.children.length === 0;
       `);
       if (!notReady || Date.now() > launcherDeadline) break;
       await driver.sleep(300);
@@ -93,7 +100,7 @@ async function getCurrentQuestionDom(driver, { iframeWaitMs = 8000, iframePollMs
     }
   }
 
-  const outerHTML = await driver.executeScript('return document.documentElement.outerHTML');
+  const outerHTML = await driver.executeScript('return document.documentElement ? document.documentElement.outerHTML : null');
   return { outerHTML, driver, insideIframe: iframes.length > 0 };
 }
 
