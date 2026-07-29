@@ -12,15 +12,22 @@ async function createDashboard({ title }) {
   const { createCliRenderer, BoxRenderable, TextRenderable, ScrollBoxRenderable } = await import('@opentui/core');
   const renderer = await createCliRenderer({ exitOnCtrlC: true });
 
+  // Text elements here had no explicit fg/bg, so they inherited whatever the
+  // terminal's default colors were — invisible (light text on light bg) on
+  // a light-themed terminal. Pinning an explicit dark panel bg with
+  // light-contrast fg makes it readable regardless of the terminal's theme.
   const header = new TextRenderable(renderer, {
     id: 'header',
     content: title,
     fg: '#fabd2f',
+    bg: '#1d2021',
   });
 
   const stats = new TextRenderable(renderer, {
     id: 'stats',
     content: 'Questions: 0   Correct: 0   Incorrect: 0',
+    fg: '#ebdbb2',
+    bg: '#1d2021',
   });
 
   const logBox = new ScrollBoxRenderable(renderer, {
@@ -28,9 +35,11 @@ async function createDashboard({ title }) {
     flexGrow: 1,
     border: true,
     title: 'Log',
+    borderColor: '#928374',
+    backgroundColor: '#1d2021',
   });
 
-  const logText = new TextRenderable(renderer, { id: 'log-text', content: '' });
+  const logText = new TextRenderable(renderer, { id: 'log-text', content: '', fg: '#ebdbb2', bg: '#1d2021' });
   logBox.add(logText);
 
   const root = new BoxRenderable(renderer, {
@@ -39,6 +48,7 @@ async function createDashboard({ title }) {
     height: '100%',
     flexDirection: 'column',
     padding: 1,
+    backgroundColor: '#1d2021',
   });
   root.add(header);
   root.add(stats);
