@@ -63,9 +63,16 @@ async function answer(driver) {
 // .quiz-next-btn (the same element advance()/clickContinue() already act on
 // once a question passes) went visible immediately. That's the real signal
 // here, so it's checked directly instead.
+// The submit click in answer() occasionally doesn't register with the app's
+// grading (verified live: fill was correct, #quiz-submit-btn stayed enabled
+// and unclicked-looking, checkResult timed out — a second click on the same
+// button immediately flipped .quiz-next-btn visible). So checkResult
+// re-clicks Submit once, partway through its wait, instead of only ever
+// clicking it the one time from answer().
 async function checkResult(dom) {
   const driver = dom.driver;
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + 20000;
+  let retried = false;
   while (Date.now() < deadline) {
     const state = await driver.executeScript(`
       const nextBtn = document.querySelector('.quiz-next-btn');
@@ -75,6 +82,13 @@ async function checkResult(dom) {
       return null;
     `);
     if (state) return state;
+    if (!retried && Date.now() > deadline - 2500) {
+      retried = true;
+      await driver.executeScript(`
+        const btn = document.querySelector('#quiz-submit-btn');
+        if (btn && !btn.disabled) btn.click();
+      `);
+    }
     await driver.sleep(200);
   }
   throw new Error('quizMatching checkResult: timed out waiting for Continue link or incorrect feedback');
