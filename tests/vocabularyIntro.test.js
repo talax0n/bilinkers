@@ -19,6 +19,11 @@ test('detect defers to fillInBlank/errorAnalysis on real quiz pages', () => {
   assert.equal(vocabularyIntro.detect(dom('<a href="#/n"></a><input class="quiz-input-radio">')), false);
 });
 
+test('detect matches an intro slide whose embedded quiz manifest JSON happens to contain "quiz-matching"', () => {
+  const html = '<a href="#/n"></a><script>{"quizes":[{"quizID":"quiz-matching-14","page":70731}]}</script>';
+  assert.equal(vocabularyIntro.detect(dom(html)), true);
+});
+
 test('checkResult always reports correct (nothing is graded on these pages)', async () => {
   assert.equal(await vocabularyIntro.checkResult(), 'correct');
 });
