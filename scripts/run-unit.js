@@ -166,15 +166,14 @@ const RUNNERS = { exercise: runExercise, iframe: runIframeExercise, reading: run
 // Non-quiz rows (video, reading material / Bee Notes) have no gate and no
 // questions — they complete just by being viewed. A video only counts once it
 // reaches the end, so any <video> on the page (top-level or inside an iframe)
-// is muted and seeked to its final moment, then played so the player fires
-// its "ended" progress event. Static content (notes) needs nothing beyond the
+// is muted and played normally until its ended state is observable. Static
+// content (notes) needs nothing beyond the
 // open the caller already did. Returns 'video' | 'static'.
-const SEEK_VIDEOS = `
+const PLAY_VIDEOS = `
   const vids = [...document.querySelectorAll('video')];
   vids.forEach((v) => {
     try {
       v.muted = true;
-      if (isFinite(v.duration) && v.duration > 0) v.currentTime = Math.max(0, v.duration - 0.25);
       const p = v.play();
       if (p && p.catch) p.catch(() => {});
     } catch (e) {}
@@ -184,29 +183,65 @@ const SEEK_VIDEOS = `
 
 async function completeMediaActivity(driver) {
   await driver.switchTo().defaultContent();
-  let seeked = await driver.executeScript(SEEK_VIDEOS);
-  if (seeked === 0) {
+  let playing = await driver.executeScript(PLAY_VIDEOS);
+  if (playing === 0) {
     const iframes = await driver.findElements(By.css('iframe'));
     for (const frame of iframes) {
       await driver.switchTo().frame(frame);
-      seeked += await driver.executeScript(SEEK_VIDEOS);
+      playing += await driver.executeScript(PLAY_VIDEOS);
+      if (playing > 0) break;
       await driver.switchTo().defaultContent();
-      if (seeked > 0) break;
     }
   }
-  if (seeked > 0) {
-    // Let the last fraction of a second play out so "ended" fires and the
-    // platform records the view.
-    await driver.sleep(4000);
-    return 'video';
+  if (playing > 0) {
+    // 15 minutes, not 5 — the seek-to-near-end trick below only fires once
+    // `duration` is known, and verified live: one video's metadata was slow
+    // enough to probe that it fell back to real-time playback for its full
+    // ~4:44 length, finishing (ended: true) only seconds after a 5-minute
+    // cap had already thrown. 15 minutes leaves real-time playback of any
+    // normal lecture-length video room to finish even when the seek never
+    // gets a chance to kick in.
+    const deadline = Date.now() + 15 * 60 * 1000;
+    while (Date.now() < deadline) {
+      // Actually seeking near the end (not just playing and waiting out real
+      // time) — verified live: without this a 5:24 video held up the run for
+      // its full real-time length. Seeking exactly to `duration` doesn't set
+      // `ended` — it's only ever set by playback actually running forward
+      // into the end (verified live: jumping straight to duration left
+      // ended=false indefinitely; seeking to duration-1 while playing let
+      // the last second play out and ended flip true within ~2s). So this
+      // seeks to one second before the end instead, once, and lets it play
+      // out. Re-checked (not re-seeked) every poll since a video's duration
+      // isn't always known yet on the first pass (metadata still loading).
+      const ended = await driver.executeScript(`
+        const vids = [...document.querySelectorAll('video')];
+        vids.forEach((v) => {
+          if (!v.ended && v.duration && isFinite(v.duration) && v.currentTime < v.duration - 1) {
+            v.currentTime = Math.max(0, v.duration - 1);
+          }
+          if (!v.ended && v.paused) {
+            const p = v.play();
+            if (p && p.catch) p.catch(() => {});
+          }
+        });
+        return vids.length > 0 && vids.every((v) => v.ended);
+      `);
+      if (ended) return 'video';
+      await driver.sleep(300);
+    }
+    throw new Error('Video did not finish within 15 minutes.');
   }
   // Static reading material / notes — opening it is enough to mark it viewed.
   await driver.sleep(1500);
   return 'static';
 }
 
-async function main() {
-  const driver = await attachToBrave();
+// existingDriver lets an orchestrator (run-course.js) drive one continuous
+// browser session across several units instead of each script re-attaching
+// its own driver; standalone invocation (via cli.js or `node
+// scripts/run-unit.js` directly) still attaches its own as before.
+async function main(existingDriver) {
+  const driver = existingDriver || (await attachToBrave());
   const unitUrl = await driver.getCurrentUrl();
 
   // Titles we've already opened this run. A row that can't be auto-completed
@@ -217,15 +252,19 @@ async function main() {
 
   for (;;) {
     const rows = await readRows(driver);
+    if (rows.length === 0) {
+      logger.warn('No unit activity rows found — stopping');
+      return { status: 'stuck', reason: 'no-rows' };
+    }
     const next = rows.find((r) => !r.disabled && !r.completed && !attempted.has(r.title));
     if (!next) {
       const stuck = rows.filter((r) => !r.disabled && !r.completed).map((r) => r.title);
       if (stuck.length) {
         logger.warn('Remaining activities could not be auto-completed — done', { stuck });
-      } else {
-        logger.info('No unfinished activities left in this unit — done', { total: rows.length });
+        return { status: 'stuck', stuck };
       }
-      break;
+      logger.info('No unfinished activities left in this unit — done', { total: rows.length });
+      return { status: 'complete', total: rows.length };
     }
     attempted.add(next.title);
 
@@ -234,13 +273,13 @@ async function main() {
     const clicked = await clickRow(driver, next.title);
     if (!clicked) {
       logger.warn('Could not click activity row — stopping', { title: next.title });
-      break;
+      return { status: 'stuck', title: next.title };
     }
 
     const navigated = await waitForUrlChange(driver, beforeUrl, 10000);
     if (!navigated) {
       logger.warn('Activity did not open (URL never changed) — stopping', { title: next.title });
-      break;
+      return { status: 'stuck', title: next.title };
     }
 
     const startedGate = await clickStartGate(driver);
@@ -270,7 +309,7 @@ async function main() {
         title: next.title,
         status: result.status,
       });
-      break;
+      return { status: 'stuck', title: next.title, activityStatus: result.status };
     }
 
     await driver.switchTo().defaultContent();
@@ -286,4 +325,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { run: main };
+module.exports = { run: main, completeMediaActivity };
