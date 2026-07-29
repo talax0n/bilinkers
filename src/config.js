@@ -1,5 +1,13 @@
 require('dotenv').config();
 
+function parseNonNegativeInteger(value, fallback) {
+  if (value === undefined) return fallback;
+  const text = String(value).trim();
+  if (!/^\d+$/.test(text)) return fallback;
+  const parsed = Number(text);
+  return Number.isSafeInteger(parsed) ? parsed : fallback;
+}
+
 function buildConfig(env) {
   return {
     llmProvider: env.LLM_PROVIDER || 'openai',
@@ -18,7 +26,7 @@ function buildConfig(env) {
       elementWaitMs: 10000,
     },
     retry: {
-      maxAnswerRetries: 10,
+      maxAnswerRetries: parseNonNegativeInteger(env.MAX_ANSWER_RETRIES, 25),
     },
     paths: {
       progressFile: './progress.json',

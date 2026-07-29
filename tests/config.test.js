@@ -16,7 +16,18 @@ test('buildConfig uses provided model', () => {
 
 test('buildConfig sets retry and path defaults', () => {
   const cfg = buildConfig({});
-  assert.equal(cfg.retry.maxAnswerRetries, 10);
+  assert.equal(cfg.retry.maxAnswerRetries, 25);
   assert.equal(cfg.paths.progressFile, './progress.json');
   assert.equal(cfg.paths.unhandledLogDir, './logs/unhandled');
+});
+
+test('buildConfig uses MAX_ANSWER_RETRIES env override', () => {
+  const cfg = buildConfig({ MAX_ANSWER_RETRIES: '7' });
+  assert.equal(cfg.retry.maxAnswerRetries, 7);
+});
+
+test('buildConfig falls back for invalid MAX_ANSWER_RETRIES', () => {
+  assert.equal(buildConfig({ MAX_ANSWER_RETRIES: '-1' }).retry.maxAnswerRetries, 25);
+  assert.equal(buildConfig({ MAX_ANSWER_RETRIES: '1.5' }).retry.maxAnswerRetries, 25);
+  assert.equal(buildConfig({ MAX_ANSWER_RETRIES: 'nope' }).retry.maxAnswerRetries, 25);
 });
