@@ -39,7 +39,7 @@ async function answer(driver) {
   if (!clicked) {
     throw new Error('vocabularyIntro.answer: no "#/n" next link found');
   }
-  await driver.sleep(900 + Math.random() * 600);
+  await driver.sleep(100 + Math.random() * 100);
 }
 
 async function checkResult() {

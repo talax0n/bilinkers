@@ -144,7 +144,10 @@ async function main(existingDriver) {
   let questionNum = 0;
   for (;;) {
     questionNum += 1;
-    const dom = await getCurrentQuestionDom(driver);
+    // Native MUI exercises never render an iframe, so the default 30s
+    // iframe-wait (meant for LTI activities) would otherwise be burned in
+    // full on every single question before falling through.
+    const dom = await getCurrentQuestionDom(driver, { iframeWaitMs: 300 });
     const handler = registry.findHandler(dom);
 
     if (!handler) {

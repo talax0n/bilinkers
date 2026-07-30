@@ -67,7 +67,7 @@ async function answer(driver, llmResult) {
     answers
   );
 
-  await driver.sleep(2000 + Math.random() * 1000);
+  await driver.sleep(100 + Math.random() * 100);
 
   await driver.executeScript(`
     const btn = document.querySelector('#quiz-submit-btn');

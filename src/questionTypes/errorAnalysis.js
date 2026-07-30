@@ -140,7 +140,7 @@ async function answer(driver, llmResult) {
     throw new Error(`errorAnalysis.answer: no radio option found for requested letters "${requestedLetters.join(',')}"`);
   }
 
-  await driver.sleep(2000 + Math.random() * 1000);
+  await driver.sleep(100 + Math.random() * 100);
 
   await driver.executeScript(`
     const btn = document.querySelector('#quiz-submit-btn');

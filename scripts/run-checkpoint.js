@@ -399,6 +399,24 @@ async function answerAllQuestions(
   // function of n mod 6 collides for every pair of pills spaced by a
   // multiple of 6, no choice of coefficients avoids it. A real (non-linear)
   // integer hash does, so pills 6 apart no longer trivially collide.
+  //
+  // That only staggers the STARTING offset, though — a NEW collision class
+  // still exists: two pills whose starting offsets happen to hash to the
+  // same bucket (pigeonhole-likely once there are more than a handful of
+  // still-unresolved pills, since there are only 6 buckets) advance by the
+  // same +1 every attempt and stay bucket-identical forever, i.e. permanent
+  // lockstep — verified live: pills 11/20/22/24 all landed on the same
+  // startIndexFor bucket and tracked each other in perfect lockstep
+  // (identical letter, every attempt, 50+ attempts straight, flat score)
+  // regardless of restart, since the hash is deterministic. Deriving the
+  // actual LETTER from a hash of (pill number, cycling index) rather than
+  // the index alone fixes this permanently, not just for this one collision:
+  // even pills whose idx trajectories are bit-for-bit identical forever
+  // still pick different letters every attempt, because their pill numbers
+  // differ. idx itself still advances by a plain +1 and still cycles
+  // through 6 distinct raw values per pill, so each pill still exhausts all
+  // 6 letters (just in a pill-specific shuffled order) — full coverage is
+  // preserved, only the cross-pill correlation is removed.
   const startIndexFor = (n) => {
     let h = n;
     h = ((h >>> 16) ^ h) * 0x45d9f3b;
@@ -406,12 +424,26 @@ async function answerAllQuestions(
     h = (h >>> 16) ^ h;
     return Math.abs(h) % LETTERS.length;
   };
+  // Takes the question's actual option count so the hash only ever lands on
+  // a letter that exists for THIS pill — previously this modded by the fixed
+  // LETTERS.length (6) regardless of how many options were on screen, so a
+  // 4-option question hit "no option for this letter" on E/F rounds and sat
+  // unanswered for a whole completion pass before the next attempt's letter
+  // happened to land back in range.
+  const letterIndexFor = (n, idx, count) => {
+    let h = (n * 2654435761) ^ idx;
+    h = ((h >>> 16) ^ h) * 0x45d9f3b;
+    h = ((h >>> 16) ^ h) * 0x45d9f3b;
+    h = (h >>> 16) ^ h;
+    return Math.abs(h) % count;
+  };
   const usedLetterIndex = new Map();
-  const letterFor = (n) => {
+  const letterFor = (n, optionCount) => {
     if (!usedLetterIndex.has(n)) {
       usedLetterIndex.set(n, pillLetters.get(n) ?? startIndexFor(n));
     }
-    return LETTERS[usedLetterIndex.get(n) % LETTERS.length];
+    const count = optionCount > 0 ? Math.min(optionCount, LETTERS.length) : LETTERS.length;
+    return LETTERS[letterIndexFor(n, usedLetterIndex.get(n), count)];
   };
 
   for (let completionPass = 1; completionPass <= maxCompletionPasses; completionPass += 1) {
@@ -442,10 +474,24 @@ async function answerAllQuestions(
         continue;
       }
 
-      const enabled = await driver.executeScript(`return [...document.querySelectorAll('button.bl-w-full.justify-content-start')].some((b) => !b.disabled)`);
-      if (!enabled) continue; // already correct (locked) — leave it, preserve the earlier letter
+      // waitForPillActiveFn above only confirms the PILL itself is marked
+      // active — it says nothing about whether the question's own answer
+      // buttons have finished rendering yet. A single immediate check here
+      // can catch them still mid-render (all momentarily disabled), which
+      // this code otherwise reads as "already locked" and silently skips —
+      // no click, no log line, indistinguishable from a genuinely-solved
+      // pill. Poll for a couple seconds first so a slow render isn't
+      // mistaken for a locked question.
+      let optionCount = 0;
+      const enabledDeadline = Date.now() + 2000;
+      while (Date.now() < enabledDeadline) {
+        optionCount = await driver.executeScript(`return [...document.querySelectorAll('button.bl-w-full.justify-content-start')].filter((b) => !b.disabled).length`);
+        if (optionCount > 0) break;
+        await driver.sleep(150);
+      }
+      if (optionCount === 0) continue; // already correct (locked) — leave it, preserve the earlier letter
 
-      const letter = letterFor(n);
+      const letter = letterFor(n, optionCount);
       try {
         const selected = await answerEveryGroupFn(driver, letter);
         if (selected === 0) throw new Error(`no option button found for letter "${letter}"`);

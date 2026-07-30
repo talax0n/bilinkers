@@ -73,6 +73,15 @@ async function readActivityState(driver) {
     return {
       url: window.location.href,
       question,
+      // The "Question N of M" counter is itself sometimes stale — live-verified
+      // on a fillInBlank activity where clicking Continue after a correct
+      // answer advanced the hash *and* the actual question sentence
+      // underneath, but left this counter frozen on the old number forever,
+      // making 'question' alone a false negative (advance() would wait the
+      // full timeout every time). The full #content text changes whenever
+      // either the counter or the underlying question content changes, so
+      // it's used as the real signal; 'question' is kept only for logging.
+      content: text,
       closing: text.includes('You can now close this activity'),
     };
   `);
@@ -82,7 +91,7 @@ async function waitForActivityChange(driver, previous, timeoutMs = 60000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const current = await readActivityState(driver);
-    if (current.closing || current.question !== previous.question) return current;
+    if (current.closing || current.content !== previous.content) return current;
     await driver.sleep(200);
   }
   return null;
@@ -224,7 +233,7 @@ async function main(existingDriver) {
     // slides that were never questions).
     if (PRESENTATION_TYPES.has(handler.name)) {
       await handler.answer(dom.driver);
-      await dom.driver.sleep(300 + Math.random() * 300);
+      await dom.driver.sleep(100 + Math.random() * 100);
       continue;
     }
 
@@ -232,7 +241,7 @@ async function main(existingDriver) {
 
     // Reading/thinking delay before answering, so submissions don't land
     // suspiciously instantly after the question loads.
-    await dom.driver.sleep(500 + Math.random() * 500);
+    await dom.driver.sleep(100 + Math.random() * 100);
 
     const questionData = handler.parse(dom);
     const skipLlm = SKIP_LLM_TYPES.has(handler.name);

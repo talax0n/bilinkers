@@ -67,21 +67,35 @@ async function readRows(driver) {
   );
 }
 
+// A JS-synthetic target.click() here was found (live) to sometimes not
+// register as a real navigation trigger on this row component — same class
+// of bug hit earlier on the island-map course nodes and checkpoint pill
+// options, both of which needed a real, trusted pointer event instead.
+// Using Actions-based click for the same reason.
 async function clickRow(driver, title) {
   await driver.switchTo().defaultContent();
-  return driver.executeScript(
-    `
-    const title = arguments[0];
-    const buttons = Array.from(document.querySelectorAll('button.bl-w-full'));
-    const target = buttons.find((b) => {
-      const label = b.querySelector('.bl-text-ellipsis');
-      return label && label.textContent.trim() === title && !b.disabled;
-    });
-    if (target) { target.click(); return true; }
-    return false;
-  `,
-    title
-  );
+  const buttons = await driver.findElements(By.css('button.bl-w-full'));
+  for (const btn of buttons) {
+    // textContent (not Selenium's getText()) to match readRows()'s reading
+    // exactly — getText() normalizes whitespace differently (e.g. collapses
+    // the literal non-breaking space some titles contain), which made this
+    // never match the title readRows() had just handed back.
+    const text = await driver.executeScript(
+      "const label = arguments[0].querySelector('.bl-text-ellipsis'); return label ? label.textContent.trim() : '';",
+      btn
+    );
+    if (!text || text !== title) continue;
+    const disabled = await driver.executeScript(
+      'return arguments[0].disabled || arguments[0].classList.contains("Mui-disabled");',
+      btn
+    );
+    if (disabled) continue;
+    await driver.executeScript("arguments[0].scrollIntoView({block: 'center'})", btn);
+    await driver.sleep(200);
+    await driver.actions({ bridge: true }).move({ origin: btn }).click().perform();
+    return true;
+  }
+  return false;
 }
 
 async function waitForUrlChange(driver, previousUrl, timeoutMs) {
@@ -131,34 +145,40 @@ async function clickStartGate(driver, timeoutMs = 8000) {
 // native quiz types (readingComprehension/audioMultipleChoice) key off of
 // distinguishes native "exercise" pages from non-exercise content
 // (video, notes) that this bot has nothing to do with.
+// Checks the iframe signal AND the top-level markup every tick instead of
+// waiting out the full iframe-poll deadline first — a native "exercise"
+// activity has no iframe at all, so the old sequential order always burned
+// the entire 8s iframe timeout before ever looking at the DOM that already
+// had its answer. Whichever signal appears first wins; only returns null
+// once nothing has shown up by the deadline.
 async function detectMode(driver) {
   await driver.switchTo().defaultContent();
   const deadline = Date.now() + 8000;
-  let iframes = await driver.findElements(By.css('iframe'));
-  while (iframes.length === 0 && Date.now() < deadline) {
+  for (;;) {
+    const iframes = await driver.findElements(By.css('iframe'));
+    if (iframes.length > 0) {
+      // Two different activities live inside an iframe: the Bits/LTI player
+      // (quiz-input-* markup, or a #/n slide-nav link) is 'iframe'; a reading
+      // BlExercise (passage + numbered tiles + MUI 'bl-w-full
+      // justify-content-start' option buttons) is 'reading'. Look inside to
+      // tell them apart — treating every iframe as 'iframe' ran the wrong
+      // runner on reading exercises.
+      await driver.switchTo().frame(iframes[0]);
+      const iframeHtml = await driver.executeScript('return document.documentElement.outerHTML');
+      await driver.switchTo().defaultContent();
+      if (iframeHtml.includes('bl-w-full justify-content-start')) return 'reading';
+      return 'iframe';
+    }
+
+    const topLevelLayout = await driver.executeScript(`return (${groupedReadingLayoutFromDocument.toString()})()`);
+    if (isGroupedReadingLayout(topLevelLayout)) return 'reading';
+
+    const topHtml = await driver.executeScript('return document.documentElement.outerHTML');
+    if (topHtml.includes('bl-w-full justify-content-start')) return 'exercise';
+
+    if (Date.now() >= deadline) return null;
     await driver.sleep(200);
-    iframes = await driver.findElements(By.css('iframe'));
   }
-  if (iframes.length > 0) {
-    // Two different activities live inside an iframe: the Bits/LTI player
-    // (quiz-input-* markup, or a #/n slide-nav link) is 'iframe'; a reading
-    // BlExercise (passage + numbered tiles + MUI 'bl-w-full
-    // justify-content-start' option buttons) is 'reading'. Look inside to
-    // tell them apart — treating every iframe as 'iframe' ran the wrong
-    // runner on reading exercises.
-    await driver.switchTo().frame(iframes[0]);
-    const iframeHtml = await driver.executeScript('return document.documentElement.outerHTML');
-    await driver.switchTo().defaultContent();
-    if (iframeHtml.includes('bl-w-full justify-content-start')) return 'reading';
-    return 'iframe';
-  }
-
-  const topLevelLayout = await driver.executeScript(`return (${groupedReadingLayoutFromDocument.toString()})()`);
-  if (isGroupedReadingLayout(topLevelLayout)) return 'reading';
-
-  const topHtml = await driver.executeScript('return document.documentElement.outerHTML');
-  if (topHtml.includes('bl-w-full justify-content-start')) return 'exercise';
-  return null;
 }
 
 const RUNNERS = { exercise: runExercise, iframe: runIframeExercise, reading: runReadingExercise };
@@ -231,8 +251,9 @@ async function completeMediaActivity(driver) {
     }
     throw new Error('Video did not finish within 15 minutes.');
   }
-  // Static reading material / notes — opening it is enough to mark it viewed.
-  await driver.sleep(1500);
+  // Static reading material / notes — opening it is enough to mark it
+  // viewed immediately, no playback/render to wait out.
+  await driver.sleep(300);
   return 'static';
 }
 

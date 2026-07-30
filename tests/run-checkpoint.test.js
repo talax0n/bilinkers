@@ -6,6 +6,7 @@ function makeDriver({ gateClickable = true } = {}) {
   const urls = ['https://lms.binus.ac.id/checkpoint-gate'];
   return {
     switchTo() { return { defaultContent: async () => {} }; },
+    async sleep() {},
     async getCurrentUrl() { return urls[urls.length - 1]; },
     async get(url) { urls.push(url); },
     async sleep() {},
@@ -147,8 +148,9 @@ test('answerAllQuestions skips a locked pill without clicking it or waiting for 
   let activePill = null;
   const driver = {
     switchTo() { return { defaultContent: async () => {} }; },
+    async sleep() {},
     async executeScript(code) {
-      if (code.includes("some((b) => !b.disabled)")) return true;
+      if (code.includes("filter((b) => !b.disabled).length")) return 6;
       if (code.includes('primary-light-shade-color')) return [];
       return false;
     },
@@ -185,8 +187,8 @@ test('answerAllQuestions skips a locked pill without clicking it or waiting for 
   assert.deepEqual(visits, [1, 3]);
   assert.deepEqual(waitedFor, [1, 3]);
   assert.deepEqual(answeredPills, [
-    { pill: 1, letter: 'B' },
-    { pill: 3, letter: 'E' },
+    { pill: 1, letter: 'A' },
+    { pill: 3, letter: 'F' },
   ]);
   assert.deepEqual(result, { status: 'answered', questionNum: 2 });
 });
@@ -197,6 +199,7 @@ test('answerAllQuestions retries a pill click once before treating it as a stall
   let pill2ActiveChecks = 0;
   const driver = {
     switchTo() { return { defaultContent: async () => {} }; },
+    async sleep() {},
     async executeScript(code) {
       if (code.includes('primary-light-shade-color')) return [];
       return true; // "enabled" check
@@ -243,8 +246,9 @@ test('answerAllQuestions navigates by pill, saves each answer, and submits witho
   let activePill = null;
   const driver = {
     switchTo() { return { defaultContent: async () => {} }; },
+    async sleep() {},
     async executeScript(code) {
-      if (code.includes("some((b) => !b.disabled)")) return activePill !== 2;
+      if (code.includes("filter((b) => !b.disabled).length")) return activePill !== 2 ? 6 : 0;
       if (code.includes('primary-light-shade-color')) return [];
       if (code.includes("t === 'Save'")) { savedPills.push(activePill); return true; }
       return false;
@@ -278,13 +282,69 @@ test('answerAllQuestions navigates by pill, saves each answer, and submits witho
   });
 
   assert.deepEqual(answeredPills, [
-    { pill: 1, letter: 'B' },
-    { pill: 3, letter: 'E' },
+    { pill: 1, letter: 'A' },
+    { pill: 3, letter: 'F' },
   ]);
   assert.deepEqual(savedPills, [1, 3]);
   assert.deepEqual(visits, [1, 2, 3]);
   assert.deepEqual(submissions, [[1, 2, 3]]);
   assert.deepEqual(result, { status: 'answered', questionNum: 2 });
+});
+
+// The bug this fixes: a pill's letter used to cycle through the full A-F
+// regardless of how many options that specific question actually rendered,
+// so a 4-option question hit "no option for this letter" on E/F rounds and
+// sat unanswered for a whole completion pass. Detecting the real option
+// count per pill and clamping the letter to that range means every letter
+// tried is guaranteed to exist, across many attempts (many different
+// pillLetters starting offsets) and multiple option counts (4 and 5).
+test('answerAllQuestions never picks a letter beyond the question\'s actual option count', async () => {
+  const lettersUsed = [];
+  const optionCounts = [4, 5, 4, 5, 4, 5];
+
+  for (let attempt = 0; attempt < optionCounts.length; attempt += 1) {
+    const optionCount = optionCounts[attempt];
+    let activePill = null;
+    const pillLetters = new Map();
+    // Pre-seed so each run starts from a different letter offset, exercising
+    // every possible starting point rather than always index 0.
+    for (let n = 1; n <= 6; n += 1) pillLetters.set(n, attempt);
+
+    const driver = {
+      switchTo() { return { defaultContent: async () => {} }; },
+      async sleep() {},
+      async executeScript(code) {
+        if (code.includes('filter((b) => !b.disabled).length')) return optionCount;
+        if (code.includes('primary-light-shade-color')) return [];
+        return false;
+      },
+    };
+
+    await answerAllQuestions(driver, pillLetters, {
+      getCurrentQuestionDomFn: async () => ({ kind: 'fake-dom' }),
+      ensurePillsExpandedFn: async () => true,
+      readPillsFn: async () => [{ n: 1 }, { n: 2 }, { n: 3 }, { n: 4 }, { n: 5 }, { n: 6 }],
+      clickPillFn: async (_driver, n) => { activePill = n; return true; },
+      waitForPillActiveFn: async (_driver, n) => activePill === n,
+      answerEveryGroupFn: async (_driver, letter) => {
+        lettersUsed.push({ optionCount, letter });
+        return 1;
+      },
+      waitForPillSavedFn: async () => true,
+      clickSubmitFn: async () => true,
+      createRegistryFn: () => ({
+        register() {},
+        findHandler() { return { name: 'fake-handler' }; },
+      }),
+      logger: { info() {}, warn() {} },
+    });
+  }
+
+  assert.ok(lettersUsed.length > 0);
+  for (const { optionCount, letter } of lettersUsed) {
+    const letterIndex = 'ABCDEF'.indexOf(letter);
+    assert.ok(letterIndex >= 0 && letterIndex < optionCount, `letter ${letter} out of range for a ${optionCount}-option question`);
+  }
 });
 
 test('answerAllQuestions submits whatever is answered when unanswered pills make no progress across passes', async () => {
@@ -295,8 +355,9 @@ test('answerAllQuestions submits whatever is answered when unanswered pills make
   const infos = [];
   const driver = {
     switchTo() { return { defaultContent: async () => {} }; },
+    async sleep() {},
     async executeScript(code) {
-      if (code.includes("some((b) => !b.disabled)")) return true;
+      if (code.includes("filter((b) => !b.disabled).length")) return 6;
       if (code.includes('primary-light-shade-color')) {
         unansweredChecks += 1;
         return unansweredChecks === 1 ? [2, 3] : [2, 3];
@@ -361,8 +422,9 @@ test('answerAllQuestions advances each pill\'s letter independently across attem
   function driverFor(pass) {
     return {
       switchTo() { return { defaultContent: async () => {} }; },
+    async sleep() {},
       async executeScript(code) {
-        if (code.includes("some((b) => !b.disabled)")) return true;
+        if (code.includes("filter((b) => !b.disabled).length")) return 6;
         if (code.includes('primary-light-shade-color')) return [];
         return false;
       },
@@ -391,17 +453,19 @@ test('answerAllQuestions advances each pill\'s letter independently across attem
   });
 
   await answerAllQuestions(driverFor(1), pillLetters, baseOptions());
-  // Unseen pills start at a hash of the pill number, not always 'A' — see
-  // the staggered-start test below for why. Pill 1 hashes to index 1 ('B'),
-  // pill 3 hashes to index 4 ('E').
-  assert.deepEqual(lettersUsed, ['B', 'E']);
+  // Unseen pills start at a hash of the pill number (index 1 for pill 1,
+  // index 4 for pill 3), and the actual letter tried is then a further hash
+  // of (pill number, index) — not the index's own ordinal letter — so that
+  // two pills sharing an index (or even an entire idx trajectory) never
+  // pick the same letter. Pill 1 -> 'A', pill 3 -> 'F'.
+  assert.deepEqual(lettersUsed, ['A', 'F']);
   assert.deepEqual([...pillLetters.entries()], [[1, 2], [3, 5]]); // both advanced one step past their start
 
-  pill1Locked = true; // pretend pill 1's "B" attempt was graded correct
+  pill1Locked = true; // pretend pill 1's "A" attempt was graded correct
   lettersUsed.length = 0;
 
   await answerAllQuestions(driverFor(2), pillLetters, baseOptions());
-  assert.deepEqual(lettersUsed, ['F']); // only pill 3 touched — pill 1 is locked, skipped entirely
+  assert.deepEqual(lettersUsed, ['E']); // only pill 3 touched — pill 1 is locked, skipped entirely
   assert.deepEqual([...pillLetters.entries()], [[1, 2], [3, 6]]); // pill 1 frozen, pill 3 kept advancing
 });
 
@@ -423,8 +487,9 @@ test('answerAllQuestions staggers unseen pills\' starting letters with a non-lin
   let activePill = null;
   const driver = {
     switchTo() { return { defaultContent: async () => {} }; },
+    async sleep() {},
     async executeScript(code) {
-      if (code.includes("some((b) => !b.disabled)")) return true;
+      if (code.includes("filter((b) => !b.disabled).length")) return 6;
       if (code.includes('primary-light-shade-color')) return [];
       return false;
     },

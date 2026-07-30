@@ -130,6 +130,7 @@ async function main(
     waitForUrlChangeFn = waitForUrlChange,
     runUnitFn = runUnit,
     runCheckpointFn = runCheckpoint,
+    readRetryMs = 5000,
   } = {}
 ) {
   const driver = existingDriver || (await attachToBrave());
@@ -138,7 +139,20 @@ async function main(
   const attempted = new Set();
 
   for (;;) {
-    const [nodes, progress] = await Promise.all([readCourseNodesFn(driver), readProgressFn(driver)]);
+    // The roadmap is still loading for a beat right after navigating back to
+    // it (live-verified: a fixed 1500ms post-navigation sleep wasn't always
+    // enough — an immediate read here caught 0 nodes and null progress even
+    // though the same page read fine moments later), so a single miss isn't
+    // trusted as "genuinely missing" — poll for a few seconds first.
+    const readDeadline = Date.now() + readRetryMs;
+    let nodes;
+    let progress;
+    for (;;) {
+      [nodes, progress] = await Promise.all([readCourseNodesFn(driver), readProgressFn(driver)]);
+      const ok = Array.isArray(nodes) && nodes.length && progress && progress.unit && progress.checkpoint;
+      if (ok || Date.now() > readDeadline) break;
+      await driver.sleep(300);
+    }
     if (!Array.isArray(nodes) || !nodes.length || !progress || !progress.unit || !progress.checkpoint) {
       logger.warn('Course roadmap or progress could not be read — stopping', { nodes: Array.isArray(nodes) ? nodes.length : null, progress });
       return { status: 'stuck', reason: 'missing-roadmap' };

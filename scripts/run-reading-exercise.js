@@ -234,7 +234,8 @@ async function main(existingDriver) {
   const driver = existingDriver || (await attachToBrave());
   const tried = new Map();
 
-  await getCurrentQuestionDom(driver);
+  // Native MUI exercise, no iframe — skip the LTI-oriented 30s default wait.
+  await getCurrentQuestionDom(driver, { iframeWaitMs: 300 });
   const pills = await readPills(driver);
   const tileCount = pills.length;
   if (tileCount < 2) {

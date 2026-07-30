@@ -11,7 +11,9 @@
     "exercise": "bun scripts/cli.js exercise",
     "iframe": "bun scripts/cli.js iframe",
     "unit": "bun scripts/cli.js unit",
-    "checkpoint": "bun scripts/cli.js checkpoint"
+    "checkpoint": "bun scripts/cli.js checkpoint",
+    "course": "bun scripts/cli.js course",
+    "level": "bun scripts/cli.js level"
   },
   "engines": {
     "bun": ">=1.3.0"

@@ -51,7 +51,7 @@ async function processQuestion({
 
   while (attempts <= retryLimit) {
     if (attempts > 0) {
-      await driver.sleep(1500 + Math.random() * 1500);
+      await driver.sleep(100 + Math.random() * 100);
     }
     try {
       const llmResult = await callWithRetry(answerQuestionFn, [llmClient, model, instruction, questionData, feedback], driver);

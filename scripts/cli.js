@@ -10,7 +10,7 @@ const { isGroupedReadingLayout, groupedReadingLayoutFromDocument } = require('./
 
 // One-command entry point: launches your Chromium-based browser with remote
 // debugging on, waits for you to log in and open the exercise, then runs the
-// matching bot script. Usage: node scripts/cli.js [exercise|iframe|unit|checkpoint|course] [url]
+// matching bot script. Usage: node scripts/cli.js [exercise|iframe|unit|checkpoint|course|level] [url]
 // Mode is optional — if omitted, it's auto-detected from the page after you
 // press Enter (the native MUI exercise, an LTI-embedded iframe activity, and
 // a unit's own activity list all have distinct, unambiguous DOM markers), so
@@ -39,6 +39,7 @@ const MODES = {
   checkpoint: '../scripts/run-checkpoint.js',
   'checkpoint-capture': '../scripts/run-checkpoint-capture.js',
   course: '../scripts/run-course.js',
+  level: '../scripts/run-level.js',
 };
 
 function resolveBinaryPath() {
@@ -166,6 +167,19 @@ async function detectMode() {
     `);
     if (isCourseMap) {
       return 'course';
+    }
+
+    // The island map (one level up from a course roadmap) reuses the exact
+    // same '.hoverable-pointer' node shape, just with "B1.1"-style course
+    // labels ("B1.1", "C2.2", ...) instead of "Unit1"/"Checkpoint1" — so it
+    // must be checked with its own regex, not lumped into isCourseMap.
+    const isLevelMap = await driver.executeScript(`
+      return [...document.querySelectorAll('.hoverable-pointer')].some((el) =>
+        /^[BC]\\d\\.\\d$/i.test(el.textContent.replace(/\\s+/g, '').trim())
+      );
+    `);
+    if (isLevelMap) {
+      return 'level';
     }
 
     const topLevelLayout = await driver.executeScript(`return (${groupedReadingLayoutFromDocument.toString()})()`);

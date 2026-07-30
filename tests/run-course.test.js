@@ -111,6 +111,7 @@ test('run-course does not complete when roadmap nodes or progress are absent', a
   const result = await runCourse(driver, {
     readCourseNodesFn: async () => [],
     readProgressFn: async () => ({ unit: null, checkpoint: null }),
+    readRetryMs: 50,
   });
 
   assert.deepEqual(result, { status: 'stuck', reason: 'missing-roadmap' });

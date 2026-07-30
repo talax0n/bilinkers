@@ -48,7 +48,7 @@ async function answer(driver) {
     throw new Error('quizMatching.answer: no dropzone/draggable pairs found to fill');
   }
 
-  await driver.sleep(1000 + Math.random() * 500);
+  await driver.sleep(100 + Math.random() * 100);
 
   await driver.executeScript(`
     const btn = document.querySelector('#quiz-submit-btn');
