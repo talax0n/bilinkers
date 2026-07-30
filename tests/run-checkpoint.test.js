@@ -521,3 +521,9 @@ test('answerAllQuestions staggers unseen pills\' starting letters with a non-lin
 
   assert.notEqual(lettersByPill[14], lettersByPill[20]);
 });
+
+test('readPills and clickPill are exported for reuse by other scripts', () => {
+  const mod = require('../scripts/run-checkpoint');
+  assert.equal(typeof mod.readPills, 'function');
+  assert.equal(typeof mod.clickPill, 'function');
+});
