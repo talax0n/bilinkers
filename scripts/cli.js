@@ -40,6 +40,7 @@ const MODES = {
   'checkpoint-capture': '../scripts/run-checkpoint-capture.js',
   course: '../scripts/run-course.js',
   level: '../scripts/run-level.js',
+  'final-test': '../scripts/run-final-test.js',
 };
 
 function resolveBinaryPath() {

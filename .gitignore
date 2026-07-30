@@ -7,3 +7,4 @@ logs/
 checkpoint-capture.json
 scripts/_*.js
 scripts/run-checkpoint-capture.js
+final-test-answers.md
