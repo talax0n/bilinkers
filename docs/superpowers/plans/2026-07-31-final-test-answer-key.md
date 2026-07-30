@@ -223,8 +223,9 @@ function makeDom(handlerName, questionData) {
   return { handlerName, questionData };
 }
 
-function makeFakeRegistry(byPillHandler) {
+function makeFakeRegistry() {
   return () => ({
+    register() {},
     findHandler(dom) {
       if (!dom.handlerName) return null;
       return { name: dom.handlerName, parse: () => dom.questionData };
