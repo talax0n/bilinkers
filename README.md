@@ -1,6 +1,6 @@
 # Beelingua Auto-Bot
 
-A browser-driven bot that completes the Beelingua English course automatically. It reads each question straight out of the page DOM, asks an LLM (any OpenAI-compatible provider, or Gemini) for the answer, and drives Selenium to submit it — retrying in place (up to 10 times, feeding the wrong-answer feedback, plus a running list of already-ruled-out answers, back to the LLM each try) before giving up on that question. It can also drive a whole unit's activity list end to end (`npm run unit`), opening and finishing each unfinished exercise in turn, or a checkpoint quiz between units (`npm run checkpoint`), retrying the whole attempt until it passes.
+A browser-driven bot that completes the Beelingua English course automatically. It reads each question straight out of the page DOM, asks an LLM (any OpenAI-compatible provider, or Gemini) for the answer, and drives Selenium to submit it — retrying in place (up to 10 times, feeding the wrong-answer feedback, plus a running list of already-ruled-out answers, back to the LLM each try) before giving up on that question. It can also drive a whole unit's activity list end to end (`npm run unit`), opening and finishing each unfinished exercise in turn, or a checkpoint quiz between units (`npm run checkpoint`), retrying the whole attempt until it passes. It can also scrape a Final Test's questions into a Markdown answer key (`npm run final-test`) — read-only, since a Final Test allows only 1 attempt, so the bot never clicks an option itself and leaves the actual answering to you.
 
 > [!IMPORTANT]
 > This project is for personal/educational automation of your own coursework. You are responsible for complying with your institution's academic integrity policies before using it.
@@ -110,6 +110,7 @@ npm run unit        # a unit's activity list — runs every unfinished row in tu
 npm run checkpoint  # a checkpoint quiz (30 questions, passing score 100) — retries the whole attempt until it passes
 npm run course      # a course's roadmap — runs every unfinished unit/checkpoint node in turn
 npm run level       # the island map — runs every course from B1.1 through C2.2 in turn
+npm run final-test  # scrapes an open Final Test's questions into final-test-answers.md — never clicks an answer, Save, or Submit
 ```
 
 It opens the browser at `https://lms.binus.ac.id` by default (pass a different URL as an extra arg: `npm run bot -- https://example.com`), prompts `Log in and open the exercise, then press Enter to start the bot...`, and once you hit Enter:
@@ -187,6 +188,7 @@ scripts/
   run-iframe-exercise.js   Bot logic for LTI-embedded activities (exports run(driver?), also runnable directly)
   run-unit.js              Walks a unit's activity list end to end: opens the next unfinished row, runs exercise/iframe against it on the same browser session, returns to the list, repeats (exports run(driver?), also runnable directly)
   run-checkpoint.js        Drives one checkpoint gate to a passing score: clicks Start Attempt N/Continue, runs run-exercise.js's question loop on the same session, and — since attempts are unlimited on the platform — retries the whole checkpoint from the gate (capped at 5 attempts) if the resulting score is under 100; stops immediately instead of retrying on an unhandled question type (exports run(driver?, { runExerciseFn }?), also runnable directly)
+  run-final-test.js        Read-only Final Test scraper: walks every pill, guesses each non-listening question once via the LLM, skips listening questions, writes final-test-answers.md — never clicks an option, Save, or Submit (exports run(driver?), scrapeFinalTest, answerWithRetry, formatQuestionRecord, buildMarkdown, also runnable directly)
 docs/superpowers/
   specs/                 Design docs
   plans/                 Implementation plans
