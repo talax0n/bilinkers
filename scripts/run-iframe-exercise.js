@@ -16,7 +16,14 @@ const logger = require('../src/logger');
 // (createBruteForceAnswerer below), not an LLM call, so no format note is
 // ever read for it.
 const FORMAT_NOTES = {
-  fillInBlank: 'If multiple blanks, return {"answers": [...]} in order; if one blank, return {"answer": "..."}.',
+  // The on-screen instruction's own worked example shows the answer written
+  // out inside a full sentence (e.g. "Answer: ... I will be travelling to
+  // Surabaya.") — without this, the model pattern-matches that shape and
+  // returns the whole sentence instead of just the blank-filler words
+  // (verified live: an input ended up holding "I think he is going to win
+  // the race..." instead of just "is going to win").
+  fillInBlank:
+    'Return ONLY the word(s) that fill the blank(s) — never the surrounding sentence, even though the worked example above shows the answer inside a full sentence. If multiple blanks, return {"answers": [...]} in order (each entry just the words for that one blank); if one blank, return {"answer": "..."} with just those words.',
 };
 
 // Neither question type has a fixed task — the on-screen instruction (read
