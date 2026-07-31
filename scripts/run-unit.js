@@ -309,7 +309,22 @@ async function main(existingDriver) {
       await driver.sleep(1500);
     }
 
-    const mode = await detectMode(driver);
+    // A "Reading" row can mix plain single-group questions with an
+    // "Original vs Paraphrased Text" cluster that renders SEVERAL
+    // questions' option-button groups in the DOM simultaneously (verified
+    // live: 5 groups of 5 buttons each, distinguished only by scroll
+    // position, several enabled at once). detectMode()'s DOM-sniffing
+    // sometimes still calls this 'exercise' (the naive
+    // document.querySelectorAll('...').find(startsWith(letter)) in
+    // _optionButtons.js then grabs whichever group's button matches first
+    // in DOM order, not the one actually being answered — burns all 25
+    // retries as "incorrect" on every clustered question). run-reading-
+    // exercise.js's own group-scoped, Check-button/lock-driven brute force
+    // already handles this shape correctly (and plain standalone questions
+    // too, per its own live verification) with no LLM/text-parsing
+    // involved, so the row's own title — known before it's even opened —
+    // is a more reliable signal here than sniffing the DOM.
+    const mode = next.title === 'Reading' ? 'reading' : await detectMode(driver);
     if (!mode) {
       // Not a quiz — a video or static reading material / notes. Complete it
       // by viewing: videos are seeked to the end, notes just need the open.
