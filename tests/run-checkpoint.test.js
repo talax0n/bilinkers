@@ -184,8 +184,8 @@ test('answerAllQuestions skips a locked pill without clicking it or waiting for 
     logger: { info() {}, warn() {} },
   });
 
-  assert.deepEqual(visits, [1, 3]);
-  assert.deepEqual(waitedFor, [1, 3]);
+  assert.deepEqual(visits, [1, 3, 3]); // last pill re-navigated before Submit
+  assert.deepEqual(waitedFor, [1, 3, 3]);
   assert.deepEqual(answeredPills, [
     { pill: 1, letter: 'A' },
     { pill: 3, letter: 'A' },
@@ -234,7 +234,7 @@ test('answerAllQuestions retries a pill click once before treating it as a stall
     logger: { info() {}, warn() {} },
   });
 
-  assert.deepEqual(clickAttempts, [1, 2, 2]); // pill 2 clicked twice: first miss, then the retry
+  assert.deepEqual(clickAttempts, [1, 2, 2, 2]); // pill 2 clicked twice (first miss + retry), then again for the pre-submit last-pill nav
   assert.deepEqual(result, { status: 'answered', questionNum: 2 });
 });
 
@@ -286,8 +286,8 @@ test('answerAllQuestions navigates by pill, saves each answer, and submits witho
     { pill: 3, letter: 'A' },
   ]);
   assert.deepEqual(savedPills, [1, 3]);
-  assert.deepEqual(visits, [1, 2, 3]);
-  assert.deepEqual(submissions, [[1, 2, 3]]);
+  assert.deepEqual(visits, [1, 2, 3, 3]); // last pill re-navigated before Submit
+  assert.deepEqual(submissions, [[1, 2, 3, 3]]);
   assert.deepEqual(result, { status: 'answered', questionNum: 2 });
 });
 
@@ -420,7 +420,7 @@ test('answerAllQuestions submits whatever is answered when unanswered pills make
   assert.deepEqual(result, { status: 'answered', questionNum: 6 });
   assert.deepEqual(submissions, ['submit']);
   assert.equal(unansweredChecks, 2);
-  assert.deepEqual(visits, [1, 2, 3, 1, 2, 3]);
+  assert.deepEqual(visits, [1, 2, 3, 1, 2, 3, 3]); // last pill re-navigated before Submit
   assert.equal(infos.some(({ message, data }) => message.includes('made no progress') && Array.isArray(data.unanswered)), true);
 });
 

@@ -109,7 +109,13 @@ async function clickSubmit(driver, { maxSubmitClicks = 3, confirmWaitMs = 8000, 
         return btn ? false : null;
       `);
       if (clicked) break;
-      if (clicked === null) break; // button not rendered at all — give up fast, retrying won't summon it
+      if (clicked === null) {
+        // Not rendered yet — keep polling within the window rather than
+        // giving up on the first sighting; the last-pill navigation + render
+        // can still be settling.
+        await driver.sleep(200);
+        continue;
+      }
       await driver.sleep(200);
     }
     if (!clicked) {
@@ -518,6 +524,22 @@ async function answerAllQuestions(
       });
       break;
     }
+  }
+
+  // The checkpoint-wide Submit button ONLY exists on the last question's
+  // screen — earlier questions show just the per-question Save (verified
+  // live: "The last question has no Save & Next — instead it shows a
+  // per-question Save and a checkpoint-wide Submit side by side"). The Save
+  // click fired after each answer navigates erratically (its next-jump goes
+  // to the next *unanswered* question), so after the completion-pass loop the
+  // browser is NOT necessarily sitting on the last pill anymore — and without
+  // it there's no Submit button to click. Navigate back to the last pill
+  // first so clickSubmit actually has something to click.
+  const lastPill = pills[pills.length - 1];
+  if (lastPill) {
+    await ensurePillsExpandedFn(driver);
+    await clickPillFn(driver, lastPill.n);
+    await waitForPillActiveFn(driver, lastPill.n);
   }
 
   const submitted = await clickSubmitFn(driver);
