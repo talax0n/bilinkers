@@ -90,20 +90,39 @@ async function clickGateButton(driver, timeoutMs = 8000) {
 // click it again. Returns true only once the confirm modal actually appeared
 // and was confirmed — a false return is now a real "submit did not go
 // through" signal the caller surfaces instead of ignoring.
-async function clickSubmit(driver, { maxSubmitClicks = 3, confirmWaitMs = 8000 } = {}) {
+async function clickSubmit(driver, { maxSubmitClicks = 3, confirmWaitMs = 8000, enabledWaitMs = 4000, logger: injectedLogger = logger } = {}) {
   await driver.switchTo().defaultContent();
 
   for (let submitAttempt = 1; submitAttempt <= maxSubmitClicks; submitAttempt += 1) {
-    const clicked = await driver.executeScript(`
-      const buttons = Array.from(document.querySelectorAll('button'));
-      const btn = buttons.find((b) => b.textContent.trim() === 'Submit');
-      if (btn && !btn.disabled) { btn.click(); return true; }
-      return false;
-    `);
-    if (!clicked) return false;
-
-    const deadline = Date.now() + confirmWaitMs;
+    // A transiently-disabled Submit is NOT a failure — the save's network
+    // call can still be settling and leave the button disabled for a moment
+    // (verified live everywhere else in this file: pill/save clicks race the
+    // same re-render). Poll for it to become enabled before declaring this
+    // attempt dead.
+    const deadline = Date.now() + enabledWaitMs;
+    let clicked = false;
     while (Date.now() < deadline) {
+      clicked = await driver.executeScript(`
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const btn = buttons.find((b) => b.textContent.trim() === 'Submit');
+        if (btn && !btn.disabled) { btn.click(); return true; }
+        return btn ? false : null;
+      `);
+      if (clicked) break;
+      if (clicked === null) break; // button not rendered at all — give up fast, retrying won't summon it
+      await driver.sleep(200);
+    }
+    if (!clicked) {
+      if (clicked === null) {
+        injectedLogger.warn('Checkpoint: Submit button never appeared — cannot submit', { submitAttempt });
+      } else {
+        injectedLogger.warn('Checkpoint: Submit button stayed disabled — cannot submit', { submitAttempt });
+      }
+      return false;
+    }
+
+    const confirmDeadline = Date.now() + confirmWaitMs;
+    while (Date.now() < confirmDeadline) {
       const confirmed = await driver.executeScript(`
         const buttons = Array.from(document.querySelectorAll('button'));
         const btn = buttons.find((b) => b.textContent.trim() === 'Yes');

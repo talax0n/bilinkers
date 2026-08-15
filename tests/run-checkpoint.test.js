@@ -543,13 +543,51 @@ test('clickSubmit retries the Submit click when the first one never opens the co
   assert.equal(submitClicks, 2);
 });
 
-test('clickSubmit returns false when the Submit button is never present', async () => {
+test('clickSubmit returns false when the Submit button is never rendered', async () => {
   const driver = {
     switchTo() { return { defaultContent: async () => {} }; },
     async sleep() {},
-    async executeScript() { return false; },
+    async executeScript() { return null; }, // no button in the DOM at all
   };
-  assert.equal(await clickSubmit(driver, { maxSubmitClicks: 3, confirmWaitMs: 200 }), false);
+  assert.equal(await clickSubmit(driver, { maxSubmitClicks: 3, enabledWaitMs: 200, confirmWaitMs: 200 }), false);
+});
+
+test('clickSubmit waits for a transiently-disabled Submit button to enable, then submits', async () => {
+  let disabled = true;
+  let submitClicks = 0;
+  let confirmVisible = false;
+  const driver = {
+    switchTo() { return { defaultContent: async () => {} }; },
+    async sleep(ms) {
+      if (ms === 200 && disabled) disabled = false; // save settles, button enables
+    },
+    async executeScript(code) {
+      if (code.includes("=== 'Submit'")) {
+        if (disabled) return false; // found but disabled
+        submitClicks += 1;
+        confirmVisible = true; // a landed Submit click opens the confirm right away
+        return true;
+      }
+      if (code.includes("=== 'Yes'")) return confirmVisible;
+      return false;
+    },
+  };
+  assert.equal(await clickSubmit(driver, { maxSubmitClicks: 3, enabledWaitMs: 1000, confirmWaitMs: 200 }), true);
+  assert.equal(submitClicks, 1);
+});
+
+test('clickSubmit returns false when the Submit button stays disabled the whole window', async () => {
+  const warns = [];
+  const driver = {
+    switchTo() { return { defaultContent: async () => {} }; },
+    async sleep() {},
+    async executeScript(code) {
+      if (code.includes("=== 'Submit'")) return false; // found but permanently disabled
+      return false;
+    },
+  };
+  assert.equal(await clickSubmit(driver, { maxSubmitClicks: 3, enabledWaitMs: 300, confirmWaitMs: 100, logger: { info() {}, warn(m) { warns.push(m); } } }), false);
+  assert.equal(warns.some((m) => m.includes('stayed disabled')), true);
 });
 
 test('clickSubmit returns false when the confirm never appears across all submit retries', async () => {
