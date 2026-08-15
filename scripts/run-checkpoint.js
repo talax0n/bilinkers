@@ -80,27 +80,45 @@ async function clickGateButton(driver, timeoutMs = 8000) {
 // Yes/No confirm, same shape as run-exercise.js's native-exercise finishing
 // sequence (but with no further "Next" afterward — the very next render is
 // the result page).
-async function clickSubmit(driver) {
+// The Submit click has the same silent-drop race as every other click this
+// codebase has hit live (pill nav, Save, quizMatching's submit): a click that
+// doesn't register leaves the attempt page exactly as it was, no confirm modal,
+// no error. A single click attempt then burns the whole attempt's worth of
+// answering for nothing when waitForScore below times out. So the Submit click
+// is retried: click Submit, poll for the "Are you sure?" Yes confirm; if the
+// confirm never shows within the window, the Submit click didn't land, so
+// click it again. Returns true only once the confirm modal actually appeared
+// and was confirmed — a false return is now a real "submit did not go
+// through" signal the caller surfaces instead of ignoring.
+async function clickSubmit(driver, { maxSubmitClicks = 3, confirmWaitMs = 8000 } = {}) {
   await driver.switchTo().defaultContent();
-  const clicked = await driver.executeScript(`
-    const buttons = Array.from(document.querySelectorAll('button'));
-    const btn = buttons.find((b) => b.textContent.trim() === 'Submit');
-    if (btn && !btn.disabled) { btn.click(); return true; }
-    return false;
-  `);
-  if (!clicked) return false;
 
-  const deadline = Date.now() + 8000;
-  while (Date.now() < deadline) {
-    const confirmed = await driver.executeScript(`
+  for (let submitAttempt = 1; submitAttempt <= maxSubmitClicks; submitAttempt += 1) {
+    const clicked = await driver.executeScript(`
       const buttons = Array.from(document.querySelectorAll('button'));
-      const btn = buttons.find((b) => b.textContent.trim() === 'Yes');
+      const btn = buttons.find((b) => b.textContent.trim() === 'Submit');
       if (btn && !btn.disabled) { btn.click(); return true; }
       return false;
     `);
-    if (confirmed) return true;
-    await driver.sleep(200);
+    if (!clicked) return false;
+
+    const deadline = Date.now() + confirmWaitMs;
+    while (Date.now() < deadline) {
+      const confirmed = await driver.executeScript(`
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const btn = buttons.find((b) => b.textContent.trim() === 'Yes');
+        if (btn && !btn.disabled) { btn.click(); return true; }
+        return false;
+      `);
+      if (confirmed) return true;
+      await driver.sleep(200);
+    }
+
+    // No Yes confirm within the window — the Submit click never registered
+    // (same race as the pill/save clicks). Retry the whole Submit+confirm.
+    await driver.sleep(300);
   }
+
   return false;
 }
 
@@ -561,7 +579,11 @@ async function answerAllQuestions(
     pillLetters.set(n, idx + 1);
   }
 
-  await clickSubmitFn(driver);
+  const submitted = await clickSubmitFn(driver);
+  if (!submitted) {
+    injectedLogger.warn('Checkpoint: submit did not go through — stopping instead of pretending the attempt completed', { questionNum: answered });
+    return { status: 'submit-failed', questionNum: answered };
+  }
   return { status: 'answered', questionNum: answered };
 }
 
@@ -569,6 +591,13 @@ async function runCheckpointAttempt(driver, pillLetters) {
   const answerResult = await answerAllQuestions(driver, pillLetters);
   if (answerResult.status === 'unhandled') {
     return { status: 'unhandled', questionNum: answerResult.questionNum };
+  }
+  if (answerResult.status === 'submit-failed') {
+    // The Submit click never landed (or the confirm never appeared) — no
+    // result page is coming, so don't burn waitForScore's timeout pretending
+    // an attempt happened. Surface it so main can decide instead of treating
+    // it as a completed-but-wrong attempt.
+    return { status: 'submit-failed', questionNum: answerResult.questionNum };
   }
 
   const score = await waitForScore(driver);
@@ -584,6 +613,7 @@ async function main(existingDriver, { runExerciseFn = runCheckpointAttempt } = {
   // advance across attempts (see answerAllQuestions), not reset every time
   // the gate reloads.
   const pillLetters = new Map();
+  let submitFailures = 0;
 
   for (let attempt = 1; ; attempt += 1) {
     logger.info('Starting checkpoint attempt', { attempt });
@@ -605,6 +635,26 @@ async function main(existingDriver, { runExerciseFn = runCheckpointAttempt } = {
       logger.warn('Unhandled question type inside checkpoint — stopping', { attempt, questionNum: result.questionNum });
       return { status: 'unhandled', attempt, questionNum: result.questionNum };
     }
+
+    if (result.status === 'submit-failed') {
+      // The attempt page's per-pill answers were saved individually, so a
+      // retry from the gate (Continue) resumes the same attempt with its
+      // answers intact and only needs to land Submit. But a submit that
+      // fails 3 times in a row is a real problem, not a transient click
+      // race — stop rather than burn attempts against a broken button.
+      submitFailures += 1;
+      logger.warn('Checkpoint: submit did not go through — retrying from the gate', { attempt, submitFailures });
+      if (submitFailures >= 3) {
+        logger.warn('Checkpoint: submit kept failing — stopping', { attempt, submitFailures });
+        return { status: 'submit-failed', attempt };
+      }
+      await driver.switchTo().defaultContent();
+      await driver.get(gateUrl);
+      await driver.sleep(1500);
+      continue;
+    }
+
+    submitFailures = 0;
 
     if (result.score === 100) {
       logger.info('Checkpoint passed', { attempt, score: result.score });

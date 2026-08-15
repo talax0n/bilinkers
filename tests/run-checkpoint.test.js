@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { run: runCheckpoint, waitForScore, ensurePillsExpanded, waitForPillSaved, answerAllQuestions } = require('../scripts/run-checkpoint');
+const { run: runCheckpoint, waitForScore, ensurePillsExpanded, waitForPillSaved, answerAllQuestions, clickSubmit } = require('../scripts/run-checkpoint');
 
 function makeDriver({ gateClickable = true } = {}) {
   const urls = ['https://lms.binus.ac.id/checkpoint-gate'];
@@ -520,6 +520,103 @@ test('answerAllQuestions staggers unseen pills\' starting letters with a non-lin
   });
 
   assert.notEqual(lettersByPill[14], lettersByPill[20]);
+});
+
+test('clickSubmit retries the Submit click when the first one never opens the confirm', async () => {
+  let submitClicks = 0;
+  let confirmVisible = false;
+  const driver = {
+    switchTo() { return { defaultContent: async () => {} }; },
+    async sleep(ms) {
+      if (ms === 300) confirmVisible = true; // the backoff before a retry submit is where the page finally catches up
+    },
+    async executeScript(code) {
+      if (code.includes("=== 'Submit'")) {
+        submitClicks += 1;
+        return true;
+      }
+      if (code.includes("=== 'Yes'")) return confirmVisible;
+      return false;
+    },
+  };
+  assert.equal(await clickSubmit(driver, { maxSubmitClicks: 3, confirmWaitMs: 200 }), true);
+  assert.equal(submitClicks, 2);
+});
+
+test('clickSubmit returns false when the Submit button is never present', async () => {
+  const driver = {
+    switchTo() { return { defaultContent: async () => {} }; },
+    async sleep() {},
+    async executeScript() { return false; },
+  };
+  assert.equal(await clickSubmit(driver, { maxSubmitClicks: 3, confirmWaitMs: 200 }), false);
+});
+
+test('clickSubmit returns false when the confirm never appears across all submit retries', async () => {
+  let submitClicks = 0;
+  const driver = {
+    switchTo() { return { defaultContent: async () => {} }; },
+    async sleep() {},
+    async executeScript(code) {
+      if (code.includes("=== 'Submit'")) { submitClicks += 1; return true; }
+      return false;
+    },
+  };
+  assert.equal(await clickSubmit(driver, { maxSubmitClicks: 2, confirmWaitMs: 100 }), false);
+  assert.equal(submitClicks, 2);
+});
+
+test('answerAllQuestions reports submit-failed when the submit click never lands', async () => {
+  const infos = [];
+  const driver = {
+    switchTo() { return { defaultContent: async () => {} }; },
+    async sleep() {},
+    async executeScript(code) {
+      if (code.includes('primary-light-shade-color')) return []; // nothing left unanswered -> single pass
+      if (code.includes("filter((b) => !b.disabled).length")) return 1;
+      return false;
+    },
+  };
+
+  const result = await answerAllQuestions(driver, new Map(), {
+    getCurrentQuestionDomFn: async () => ({ kind: 'fake-dom' }),
+    ensurePillsExpandedFn: async () => true,
+    readPillsFn: async () => [{ n: 1 }],
+    isPillLockedFn: async () => false,
+    clickPillFn: async () => true,
+    waitForPillActiveFn: async () => true,
+    answerEveryGroupFn: async () => 1,
+    clickSaveButtonFn: async () => true,
+    waitForPillSavedFn: async () => true,
+    clickSubmitFn: async () => false,
+    createRegistryFn: () => ({
+      register() {},
+      findHandler() { return { name: 'fake-handler' }; },
+    }),
+    logger: { info() {}, warn(message, data) { infos.push({ message, data }); } },
+  });
+
+  assert.deepEqual(result, { status: 'submit-failed', questionNum: 1 });
+  assert.equal(infos.some(({ message }) => message.includes('submit did not go through')), true);
+});
+
+test('runCheckpoint retries a submit-failed attempt, then passes once submit lands', async () => {
+  const driver = makeDriver();
+  let call = 0;
+  const runExerciseFn = async () => {
+    call += 1;
+    if (call === 1) return { status: 'submit-failed', questionNum: 30 };
+    return { status: 'complete', questionNum: 30, score: 100 };
+  };
+  const result = await runCheckpoint(driver, { runExerciseFn });
+  assert.deepEqual(result, { status: 'passed', attempt: 2, score: 100 });
+});
+
+test('runCheckpoint stops after 3 consecutive submit failures', async () => {
+  const driver = makeDriver();
+  const runExerciseFn = async () => ({ status: 'submit-failed', questionNum: 30 });
+  const result = await runCheckpoint(driver, { runExerciseFn });
+  assert.deepEqual(result, { status: 'submit-failed', attempt: 3 });
 });
 
 test('readPills and clickPill are exported for reuse by other scripts', () => {
