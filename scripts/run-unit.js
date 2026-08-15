@@ -330,6 +330,14 @@ async function main(existingDriver) {
       // by viewing: videos are seeked to the end, notes just need the open.
       const kind = await completeMediaActivity(driver);
       logger.info('Completed media activity', { title: next.title, kind });
+      // A video's 'ended' event only marks the row complete once the SPA's
+      // own onEnded handler has time to POST that to the backend — verified
+      // live: navigating away immediately (via driver.get(), a full reload
+      // that does the SPA's usual internal routing) raced ahead of that
+      // call, leaving the row still "In Progress" even though the client
+      // genuinely saw `ended: true`. A few seconds' grace before leaving is
+      // enough for it to land.
+      if (kind === 'video') await driver.sleep(3000);
       await driver.switchTo().defaultContent();
       await driver.get(unitUrl);
       await driver.sleep(1500);
@@ -348,7 +356,14 @@ async function main(existingDriver) {
       return { status: 'stuck', title: next.title, activityStatus: result.status };
     }
 
+    // Same backend-sync race as the media-activity branch above: navigating
+    // away right after a quiz/iframe activity reports 'complete' can still
+    // leave its row un-ticked (verified live: "Interactive Vocabulary
+    // Activity" scored 14/14 and hit its closing screen, then still showed
+    // up as incomplete on the very next row read) — a few seconds' grace
+    // before leaving lets that sync land.
     await driver.switchTo().defaultContent();
+    await driver.sleep(3000);
     await driver.get(unitUrl);
     await driver.sleep(1500);
   }

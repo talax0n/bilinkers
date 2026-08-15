@@ -4,7 +4,13 @@ const name = 'audioMultipleChoice';
 
 function detect(dom) {
   const html = dom.outerHTML;
-  return html.includes('MuiSlider-root') && html.includes('bl-w-full justify-content-start');
+  // A stale (visually hidden) slider from an earlier listening question can
+  // still be present in outerHTML — dom.hasVisibleSlider checks it's
+  // actually on-screen instead of just anywhere in the markup. Falls back
+  // to the substring check when hasVisibleSlider isn't set (e.g. a fixture
+  // dom without live visibility info).
+  const hasSlider = dom.hasVisibleSlider !== undefined ? dom.hasVisibleSlider : html.includes('MuiSlider-root');
+  return hasSlider && html.includes('bl-w-full justify-content-start');
 }
 
 function parse(dom) {

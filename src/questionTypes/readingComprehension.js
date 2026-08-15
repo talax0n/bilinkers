@@ -4,7 +4,11 @@ const name = 'readingComprehension';
 
 function detect(dom) {
   const html = dom.outerHTML;
-  return !html.includes('MuiSlider-root') && html.includes('bl-w-full justify-content-start');
+  // See audioMultipleChoice.detect: a stale hidden slider from an earlier
+  // listening question must not disqualify a real, current mcq/reading
+  // question just because its markup lingers in outerHTML.
+  const hasSlider = dom.hasVisibleSlider !== undefined ? dom.hasVisibleSlider : html.includes('MuiSlider-root');
+  return !hasSlider && html.includes('bl-w-full justify-content-start');
 }
 
 function parse(dom) {

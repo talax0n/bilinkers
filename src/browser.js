@@ -101,7 +101,17 @@ async function getCurrentQuestionDom(driver, { iframeWaitMs = 30000, iframePollM
   }
 
   const outerHTML = await driver.executeScript('return document.documentElement ? document.documentElement.outerHTML : null');
-  return { outerHTML, driver, insideIframe: iframes.length > 0 };
+  // A past listening question's MuiSlider-root audio player is left mounted
+  // (just visually hidden, not removed) once the SPA moves on to a later
+  // question — matching purely on outerHTML substring then keeps matching
+  // audioMultipleChoice forever after the first real listening question,
+  // even though its markup no longer represents the current question.
+  // offsetParent is null for any element that (or whose ancestor) is
+  // display:none, so this only counts a slider that's actually on-screen.
+  const hasVisibleSlider = await driver.executeScript(`
+    return [...document.querySelectorAll('.MuiSlider-root')].some((el) => el.offsetParent !== null);
+  `);
+  return { outerHTML, driver, insideIframe: iframes.length > 0, hasVisibleSlider };
 }
 
 async function goToNextQuestion(driver) {

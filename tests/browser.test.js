@@ -72,6 +72,10 @@ test('getCurrentQuestionDom treats absent iframe body during reload as not ready
         assert.equal(currentContext, 'iframe');
         return '<html><body><main id="content"><div>Ready</div></main></body></html>';
       }
+      if (script.includes('MuiSlider-root')) {
+        assert.equal(currentContext, 'iframe');
+        return false;
+      }
       throw new Error(`Unexpected script: ${script}`);
     },
   };
@@ -80,6 +84,7 @@ test('getCurrentQuestionDom treats absent iframe body during reload as not ready
 
   assert.equal(result.insideIframe, true);
   assert.equal(result.outerHTML, '<html><body><main id="content"><div>Ready</div></main></body></html>');
+  assert.equal(result.hasVisibleSlider, false);
   assert.equal(iframeLookupCount, 2);
   assert.equal(readinessCheckCount, 2);
   assert.equal(sleepCount, 1);
