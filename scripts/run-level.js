@@ -30,16 +30,11 @@ async function attachToBrave() {
 }
 
 // Order B1.1, B1.2, B2.1, B2.2, C1.1, C1.2, C2.1, C2.2 — derived from each
-// label's own letter/level/sub-level value, not from pixel position. The
-// course roadmap (run-course.js) gets away with a "top" pixel sort because
-// that order was verified live against the header's progress counters; no
-// such live verification exists for the island map, and the label already
-// encodes the correct order unambiguously, so parsing it directly is both
-// simpler and safer than trusting an unverified layout assumption. No
-// per-node progress counter exists on this page either (unlike the course
-// roadmap's "Unit 4/8" header), so completion is decided purely by "does
-// clicking still navigate" — a locked node's URL never changes, same rule
-// run-course.js already relies on for locked units.
+// label's own letter/level/sub-level value. Course completion is not encoded
+// in the rasterized node image or DOM attributes. Clicking an available node
+// opens a panel: completed courses expose only "View Course Detail", while an
+// unfinished course exposes "View Unit List". Locked nodes open no matching
+// panel. openNode() uses that panel contract before run-course.js takes over.
 async function readLevelNodes(driver) {
   await driver.switchTo().defaultContent();
   const nodes = await driver.executeScript(`
@@ -67,21 +62,12 @@ async function readLevelNodes(driver) {
   return parsed;
 }
 
-// Live-verified: unlike the course roadmap's Unit/Checkpoint nodes (which
-// navigate straight on a JS-synthetic `el.click()`), an island node's click
-// handler only fires on a real, trusted pointer event — a synthetic
-// `el.click()` here silently no-ops (returns true, changes nothing). It
-// also doesn't navigate directly: clicking the hex opens a side panel with
-// two buttons, "Continue Unit N" and "View Unit List". "Continue Unit N"
-// deep-links straight into that unit's own activity row list, skipping the
-// roadmap entirely — "View Unit List" is the one that actually lands on the
-// course roadmap (the "Unit 0/8 CP 0/3 FT 0/1" header + Unit/Checkpoint hex
-// nodes) that run-course.js expects, so that's the one this clicks. A
-// locked/unavailable course's node opens no panel at all (no buttons beyond
-// the header's own XP/notification ones) — "no matching button appears
-// within the timeout" is this level's equivalent of run-course.js's "URL
-// never changed" locked-node signal.
-async function clickNode(driver, label) {
+// Island nodes require a trusted pointer event. An available node opens a
+// panel whose ENG-B1.1-style heading identifies the selected course. Completed
+// courses expose only "View Course Detail"; unfinished courses additionally
+// expose "View Unit List". Locked nodes do not replace the current panel, so
+// the heading must match before any button is trusted.
+async function openNode(driver, label) {
   await driver.switchTo().defaultContent();
   const nodeEls = await driver.findElements(By.css('.hoverable-pointer'));
   let nodeTarget = null;
@@ -92,43 +78,44 @@ async function clickNode(driver, label) {
       break;
     }
   }
-  if (!nodeTarget) return false;
-  // A node can sit below the fold (island map is taller than the viewport),
-  // and a click whose target point lands outside the viewport gets clipped
-  // onto whatever fixed-position chrome (e.g. the nav sidebar) happens to
-  // occupy that screen coordinate instead of erroring — live-verified this
-  // silently navigated to the ViCon nav page rather than opening the node's
-  // panel. scrollIntoView({block:'center'}) first so the click point is
-  // always actually on-screen.
+  if (!nodeTarget) return { status: 'missing' };
+
   await driver.executeScript("arguments[0].scrollIntoView({block: 'center'})", nodeTarget);
   await driver.sleep(200);
   await driver.actions({ bridge: true }).move({ origin: nodeTarget }).click().perform();
-  // The panel slides/fades in (MUI-style transition) rather than appearing
-  // instantly — clicking its button the moment it's found in the DOM lands
-  // mid-animation and silently misses (live-verified: click "succeeds" per
-  // WebDriver but the panel stays open, no navigation). Give it a beat to
-  // settle before the button becomes a valid click target.
   await driver.sleep(500);
 
+  const expectedHeading = `ENG-${label}`;
   const deadline = Date.now() + 5000;
-  let buttonTarget = null;
-  while (Date.now() < deadline && !buttonTarget) {
-    const buttons = await driver.findElements(By.css('button'));
-    for (const button of buttons) {
-      const text = (await button.getText()).trim();
-      if (text === 'View Unit List') {
-        buttonTarget = button;
-        break;
+  while (Date.now() < deadline) {
+    const panel = await driver.executeScript(
+      `
+      const expectedHeading = arguments[0];
+      const bodyText = document.body.innerText;
+      if (!bodyText.includes(expectedHeading)) return null;
+      const buttons = [...document.querySelectorAll('button')];
+      const viewUnitList = buttons.find((button) => button.textContent.trim() === 'View Unit List');
+      const viewCourseDetail = buttons.some((button) => button.textContent.trim() === 'View Course Detail');
+      return { unfinished: Boolean(viewUnitList), completed: !viewUnitList && viewCourseDetail };
+    `,
+      expectedHeading
+    );
+
+    if (panel && panel.unfinished) {
+      const buttons = await driver.findElements(By.css('button'));
+      for (const button of buttons) {
+        if ((await button.getText()).trim() !== 'View Unit List') continue;
+        await driver.executeScript("arguments[0].scrollIntoView({block: 'center'})", button);
+        await driver.sleep(500);
+        await driver.actions({ bridge: true }).move({ origin: button }).click().perform();
+        return { status: 'opened' };
       }
     }
-    if (!buttonTarget) await driver.sleep(200);
+    if (panel && panel.completed) return { status: 'completed' };
+    await driver.sleep(200);
   }
-  if (!buttonTarget) return false;
 
-  await driver.executeScript("arguments[0].scrollIntoView({block: 'center'})", buttonTarget);
-  await driver.sleep(500);
-  await driver.actions({ bridge: true }).move({ origin: buttonTarget }).click().perform();
-  return true;
+  return { status: 'locked' };
 }
 
 async function waitForUrlChange(driver, previousUrl, timeoutMs) {
@@ -145,7 +132,7 @@ async function main(
   existingDriver,
   {
     readLevelNodesFn = readLevelNodes,
-    clickNodeFn = clickNode,
+    openNodeFn = openNode,
     waitForUrlChangeFn = waitForUrlChange,
     runCourseFn = runCourse,
     readRetryMs = 8000,
@@ -175,24 +162,27 @@ async function main(
 
     const next = nodes.find((n) => !attempted.has(n.label));
     if (!next) {
-      logger.info('No unattempted courses left on this island — done', { completed });
+      logger.info('No unfinished courses left on this island — done', { completed });
       return { status: 'complete', completed };
     }
     attempted.add(next.label);
 
-    logger.info('Opening course node', { label: next.label });
+    logger.info('Inspecting course node', { label: next.label });
     const beforeUrl = await driver.getCurrentUrl();
-    const clicked = await clickNodeFn(driver, next.label);
-    if (!clicked) {
-      logger.warn('Could not click course node — stopping', { label: next.label });
+    const opened = await openNodeFn(driver, next.label);
+    if (opened.status === 'completed') {
+      logger.info('Skipping completed course', { label: next.label });
+      await driver.get(levelUrl);
+      await driver.sleep(500);
+      continue;
+    }
+    if (opened.status !== 'opened') {
+      logger.warn('Course node is unavailable — stopping', { label: next.label, nodeStatus: opened.status });
       return { status: 'stuck', label: next.label, completed };
     }
 
     const navigated = await waitForUrlChangeFn(driver, beforeUrl, 10000);
     if (!navigated) {
-      // Locked (frontier the platform hasn't opened yet) or a click landed
-      // on the road/deco image instead of a real node. Either way nothing
-      // more is reachable right now.
       logger.warn('Course node did not open (URL never changed) — stopping', { label: next.label });
       return { status: 'stuck', label: next.label, completed };
     }
@@ -224,4 +214,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { run: main, readLevelNodes };
+module.exports = { run: main, readLevelNodes, openNode };

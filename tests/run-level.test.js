@@ -31,9 +31,9 @@ test('run-level opens course nodes in ascending island order', async () => {
 
   const result = await runLevel(driver, {
     readLevelNodesFn: async () => nodes,
-    clickNodeFn: async (_driver, label) => {
+    openNodeFn: async (_driver, label) => {
       opened.push(label);
-      return true;
+      return { status: 'opened' };
     },
     waitForUrlChangeFn: async () => 'https://lms.binus.ac.id/level/opened',
     runCourseFn: async () => ({ status: 'complete' }),
@@ -48,7 +48,7 @@ test('run-level stops when a course node fails to open (locked)', async () => {
 
   const result = await runLevel(driver, {
     readLevelNodesFn: async () => [{ type: 'course', label: 'C1.1' }],
-    clickNodeFn: async () => true,
+    openNodeFn: async () => ({ status: 'locked' }),
     waitForUrlChangeFn: async () => null, // locked: URL never changes
     runCourseFn: async () => ({ status: 'complete' }),
   });
@@ -61,7 +61,7 @@ test('run-level stops when a course inside the island gets stuck', async () => {
 
   const result = await runLevel(driver, {
     readLevelNodesFn: async () => [{ type: 'course', label: 'B1.1' }],
-    clickNodeFn: async () => true,
+    openNodeFn: async () => ({ status: 'opened' }),
     waitForUrlChangeFn: async () => 'https://lms.binus.ac.id/level/opened',
     runCourseFn: async () => ({ status: 'stuck', label: 'Unit1' }),
   });
@@ -93,9 +93,9 @@ test('run-level moves on to the next course once one completes', async () => {
 
   const result = await runLevel(driver, {
     readLevelNodesFn: async () => nodes,
-    clickNodeFn: async (_driver, label) => {
+    openNodeFn: async (_driver, label) => {
       opened.push(label);
-      return true;
+      return { status: 'opened' };
     },
     waitForUrlChangeFn: async () => 'https://lms.binus.ac.id/level/opened',
     runCourseFn: async () => ({ status: 'complete' }),
@@ -103,4 +103,32 @@ test('run-level moves on to the next course once one completes', async () => {
 
   assert.deepEqual(opened, ['B1.1', 'B1.2']);
   assert.deepEqual(result, { status: 'complete', completed: ['B1.1', 'B1.2'] });
+});
+
+test('run-level skips completed courses and hands the first unfinished course to run-course', async () => {
+  const driver = makeDriver();
+  const inspected = [];
+  const runCourses = [];
+  const nodes = [
+    { type: 'course', label: 'B1.1' },
+    { type: 'course', label: 'B1.2' },
+    { type: 'course', label: 'B2.1' },
+  ];
+
+  const result = await runLevel(driver, {
+    readLevelNodesFn: async () => nodes,
+    openNodeFn: async (_driver, label) => {
+      inspected.push(label);
+      return { status: label === 'B2.1' ? 'opened' : 'completed' };
+    },
+    waitForUrlChangeFn: async () => 'https://lms.binus.ac.id/course/opened',
+    runCourseFn: async () => {
+      runCourses.push('B2.1');
+      return { status: 'complete' };
+    },
+  });
+
+  assert.deepEqual(inspected, ['B1.1', 'B1.2', 'B2.1']);
+  assert.deepEqual(runCourses, ['B2.1']);
+  assert.deepEqual(result, { status: 'complete', completed: ['B2.1'] });
 });
