@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::{ActivityOutcome, ActivityRunners, Report};
-use crate::browser::{Driver, PageError, PageResult};
+use crate::browser::{Driver, FramedPage, Lms, PageError, PageResult, IFRAME_COUNT};
 use crate::grouped_reading::{is_grouped_reading_layout, GroupedReadingLayout};
 use crate::logger;
 
@@ -53,9 +53,6 @@ pub enum ActivityKind {
     Exercise,
     Iframe,
     Reading,
-    /// An iframe whose document the top frame cannot read (cross-origin), so iframe vs reading
-    /// is undecided. Needs per-frame CDP execution contexts.
-    UnreadableFrame,
 }
 
 impl ActivityKind {
@@ -64,7 +61,6 @@ impl ActivityKind {
             ActivityKind::Exercise => "exercise",
             ActivityKind::Iframe => "iframe",
             ActivityKind::Reading => "reading",
-            ActivityKind::UnreadableFrame => "unreadable-frame",
         }
     }
 }
@@ -73,8 +69,6 @@ impl ActivityKind {
 pub enum MediaKind {
     Video,
     Static,
-    /// No top-level video but an iframe that may hold one; playing inside frames is not ported.
-    FramedNotPorted,
 }
 
 impl MediaKind {
@@ -82,7 +76,6 @@ impl MediaKind {
         match self {
             MediaKind::Video => "video",
             MediaKind::Static => "static",
-            MediaKind::FramedNotPorted => "framed-not-ported",
         }
     }
 }
@@ -94,7 +87,6 @@ pub enum UnitStuck {
     RowNotClicked { title: String },
     RowDidNotOpen { title: String },
     Activity { title: String, outcome: ActivityOutcome },
-    Media { title: String, kind: MediaKind },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,9 +121,6 @@ impl Report for UnitOutcome {
             UnitOutcome::Stuck(UnitStuck::Activity { title, outcome }) => {
                 fields.extend([("title", json!(title)), ("activityStatus", json!(outcome.status()))]);
             }
-            UnitOutcome::Stuck(UnitStuck::Media { title, kind }) => {
-                fields.extend([("title", json!(title)), ("kind", json!(kind.name()))]);
-            }
         }
         fields
     }
@@ -156,20 +145,10 @@ const CLICK_START_GATE: &str = r#"
   return false;
 "#;
 
-/// The first iframe's document HTML, null when cross-origin, or false without an iframe.
-const FIRST_IFRAME_HTML: &str = r#"
-  const frame = document.querySelector('iframe');
-  if (!frame) return false;
-  try {
-    const doc = frame.contentDocument;
-    return doc && doc.documentElement ? doc.documentElement.outerHTML : null;
-  } catch (e) {
-    return null;
-  }
-"#;
+const DOCUMENT_HTML: &str = "return document.documentElement ? document.documentElement.outerHTML : null;";
 
 /// src/groupedReading.js groupedReadingLayoutFromDocument.
-const GROUPED_READING_LAYOUT: &str = r#"
+pub(crate) const GROUPED_READING_LAYOUT: &str = r#"
   const pills = [...document.querySelectorAll('.bl-button__container')].map((pill) => pill.textContent.trim());
   const optionLetters = [...document.querySelectorAll('button.bl-w-full.justify-content-start')]
     .filter((button) => button.offsetParent !== null)
@@ -204,14 +183,12 @@ const VIDEOS_ENDED: &str = r#"
   return vids.length > 0 && vids.every((v) => v.ended);
 "#;
 
-const IFRAME_COUNT: &str = "return document.querySelectorAll('iframe').length;";
-
 /// 15 minutes covers real-time playback when duration loads too late to seek.
 const VIDEO_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 /// The unit activity list and the activity pages it opens.
 #[allow(async_fn_in_trait)]
-pub trait UnitPage: Driver {
+pub trait UnitPage: FramedPage {
     async fn read_rows(&self) -> PageResult<Vec<Row>> {
         let rows = self.execute_script(READ_ROWS, &[json!(CHECKMARK_PATH)]).await?;
         serde_json::from_value(rows).map_err(|e| PageError(format!("unit rows: {e}")))
@@ -238,12 +215,18 @@ pub trait UnitPage: Driver {
     async fn detect_mode(&self) -> PageResult<Option<ActivityKind>> {
         let deadline = Instant::now() + Duration::from_secs(8);
         loop {
-            match self.execute_script(FIRST_IFRAME_HTML, &[]).await? {
-                Value::Bool(false) => {}
-                // Reading BlExercises also live in an iframe, with MUI option buttons instead of quiz-input-*.
-                Value::String(html) if html.contains(OPTION_MARKER) => return Ok(Some(ActivityKind::Reading)),
-                Value::String(_) => return Ok(Some(ActivityKind::Iframe)),
-                _ => return Ok(Some(ActivityKind::UnreadableFrame)),
+            if self.execute_script(IFRAME_COUNT, &[]).await?.as_u64().unwrap_or(0) > 0 {
+                // A frame between loads cannot evaluate yet; it is still an iframe activity by the deadline.
+                match self.execute_in_frame(DOCUMENT_HTML, &[]).await {
+                    // Reading BlExercises also live in an iframe, with MUI option buttons instead of quiz-input-*.
+                    Ok(Value::String(html)) if html.contains(OPTION_MARKER) => return Ok(Some(ActivityKind::Reading)),
+                    Ok(_) => return Ok(Some(ActivityKind::Iframe)),
+                    Err(_) if Instant::now() >= deadline => return Ok(Some(ActivityKind::Iframe)),
+                    Err(_) => {
+                        self.sleep(200).await;
+                        continue;
+                    }
+                }
             }
 
             let layout = self.execute_script(GROUPED_READING_LAYOUT, &[]).await?;
@@ -266,14 +249,29 @@ pub trait UnitPage: Driver {
 
     /// Video and notes rows complete by being viewed. Videos must reach their end.
     async fn complete_media_activity(&self) -> PageResult<MediaKind> {
-        let playing = self.execute_script(PLAY_VIDEOS, &[]).await?.as_u64().unwrap_or(0);
-        if playing == 0 && self.execute_script(IFRAME_COUNT, &[]).await?.as_u64().unwrap_or(0) > 0 {
-            return Ok(MediaKind::FramedNotPorted);
+        // Top-level videos first, then each iframe; the ended poll stays in the document that played.
+        let mut frame = None;
+        let mut playing = self.execute_script(PLAY_VIDEOS, &[]).await?.as_u64().unwrap_or(0);
+        if playing == 0 {
+            let iframes = self.execute_script(IFRAME_COUNT, &[]).await?.as_u64().unwrap_or(0) as usize;
+            for index in 0..iframes {
+                // A frame that cannot evaluate has no video we could play.
+                playing =
+                    self.execute_in_frame_at(index, PLAY_VIDEOS, &[]).await.ok().and_then(|v| v.as_u64()).unwrap_or(0);
+                if playing > 0 {
+                    frame = Some(index);
+                    break;
+                }
+            }
         }
         if playing > 0 {
             let deadline = Instant::now() + VIDEO_TIMEOUT;
             while Instant::now() < deadline {
-                if self.execute_script(VIDEOS_ENDED, &[]).await? == json!(true) {
+                let ended = match frame {
+                    None => self.execute_script(VIDEOS_ENDED, &[]).await?,
+                    Some(index) => self.execute_in_frame_at(index, VIDEOS_ENDED, &[]).await?,
+                };
+                if ended == json!(true) {
                     return Ok(MediaKind::Video);
                 }
                 self.sleep(300).await;
@@ -290,9 +288,9 @@ const ROW_TITLE: &str =
 const ROW_DISABLED: &str = "function() { return this.disabled || this.classList.contains('Mui-disabled'); }";
 const SCROLL_TO_CENTER: &str = "function() { this.scrollIntoView({block: 'center'}); }";
 
-impl UnitPage for chromiumoxide::Page {
+impl UnitPage for Lms {
     async fn click_row(&self, title: &str) -> PageResult<bool> {
-        for button in self.find_elements("button.bl-w-full").await? {
+        for button in self.page.find_elements("button.bl-w-full").await? {
             // textContent, not innerText, to match read_rows (innerText collapses non-breaking spaces).
             let text = button.call_js_fn(ROW_TITLE, false).await?.result.value;
             if text.as_ref().and_then(Value::as_str).is_none_or(|t| t.is_empty() || t != title) {
@@ -357,10 +355,6 @@ pub async fn run<P: UnitPage, R: ActivityRunners<P>>(page: &P, runners: &mut R) 
         let Some(mode) = mode else {
             let kind = page.complete_media_activity().await?;
             logger::info("Completed media activity", [("title", json!(title)), ("kind", json!(kind.name()))]);
-            if kind == MediaKind::FramedNotPorted {
-                logger::warn("Media inside an iframe is not ported to Rust yet — stopping", [("title", json!(title))]);
-                return Ok(UnitOutcome::Stuck(UnitStuck::Media { title, kind }));
-            }
             // Give the SPA time to POST the video's ended event before reloading.
             if kind == MediaKind::Video {
                 page.sleep(3000).await;
@@ -371,11 +365,12 @@ pub async fn run<P: UnitPage, R: ActivityRunners<P>>(page: &P, runners: &mut R) 
         };
 
         logger::info("Running activity", [("title", json!(title)), ("mode", json!(mode.name()))]);
-        let outcome = runners.run(mode, page).await?;
+        let report = runners.run(mode, page).await?;
         let mut finished = vec![("title", json!(title)), ("mode", json!(mode.name()))];
-        finished.extend(outcome.fields());
+        finished.extend(report.fields());
         logger::info("Activity finished", finished);
 
+        let outcome = report.outcome;
         if outcome.stops_unit() {
             logger::warn(
                 "Activity did not finish cleanly — stopping the unit run so it can be inspected",
@@ -394,6 +389,7 @@ pub async fn run<P: UnitPage, R: ActivityRunners<P>>(page: &P, runners: &mut R) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runners::ActivityReport;
     use std::cell::{Cell, RefCell};
 
     /// Answers each script by what it contains, like the JS tests' executeScript fakes.
@@ -425,6 +421,29 @@ mod tests {
             Ok(())
         }
         async fn sleep(&self, _ms: u64) {}
+    }
+
+    /// Frame scripts reach the fake with a marker, so one closure can answer both documents.
+    impl<F: Fn(&str) -> Value> FramedPage for FakeUnit<F> {
+        async fn execute_in_frame_at(&self, index: usize, body: &str, _args: &[Value]) -> PageResult<Value> {
+            Ok((self.script)(&format!("/*frame {index}*/{body}")))
+        }
+        async fn reload(&self) -> PageResult<()> {
+            Ok(())
+        }
+    }
+
+    /// Runners that return a fixed report.
+    struct FixedRunners(ActivityReport);
+
+    impl<P> ActivityRunners<P> for FixedRunners {
+        async fn run(&mut self, _kind: ActivityKind, _page: &P) -> PageResult<ActivityReport> {
+            Ok(self.0)
+        }
+    }
+
+    fn unhandled() -> FixedRunners {
+        FixedRunners(ActivityReport::new(ActivityOutcome::Unhandled))
     }
 
     impl<F: Fn(&str) -> Value> UnitPage for FakeUnit<F> {
@@ -462,7 +481,7 @@ mod tests {
     #[tokio::test]
     async fn run_unit_does_not_complete_when_zero_rows_are_found() {
         let page = FakeUnit::new(|_: &str| json!([]));
-        assert_eq!(run(&page, &mut super::super::Ported).await.unwrap(), UnitOutcome::Stuck(UnitStuck::NoRows));
+        assert_eq!(run(&page, &mut unhandled()).await.unwrap(), UnitOutcome::Stuck(UnitStuck::NoRows));
     }
 
     #[tokio::test]
@@ -474,12 +493,12 @@ mod tests {
                 { "title": "Reading", "disabled": false, "completed": true },
             ])
         });
-        assert_eq!(run(&page, &mut super::super::Ported).await.unwrap(), UnitOutcome::Complete { total: 2 });
+        assert_eq!(run(&page, &mut unhandled()).await.unwrap(), UnitOutcome::Complete { total: 2 });
         assert!(page.clicked.borrow().is_empty());
     }
 
     #[tokio::test]
-    async fn run_unit_stops_on_an_activity_runner_that_is_not_ported() {
+    async fn run_unit_stops_on_an_activity_runner_that_did_not_finish_cleanly() {
         let page = FakeUnit::new(|code: &str| {
             if code.contains("checkmarkPath") {
                 return json!([
@@ -490,13 +509,13 @@ mod tests {
             }
             json!(false)
         });
-        let result = run(&page, &mut super::super::Ported).await.unwrap();
+        let result = run(&page, &mut unhandled()).await.unwrap();
         assert_eq!(*page.clicked.borrow(), vec!["Reading"]);
         assert_eq!(
             result,
             UnitOutcome::Stuck(UnitStuck::Activity {
                 title: "Reading".to_string(),
-                outcome: ActivityOutcome::NotPorted
+                outcome: ActivityOutcome::Unhandled
             })
         );
     }
@@ -529,7 +548,10 @@ mod tests {
     #[tokio::test]
     async fn detect_mode_classifies_iframe_and_top_level_markup() {
         let iframe_reading = FakeUnit::new(|code: &str| {
-            if code.contains("querySelector('iframe')") {
+            if code == IFRAME_COUNT {
+                return json!(1);
+            }
+            if code.starts_with("/*frame 0*/") && code.contains("outerHTML") {
                 return json!(
                     "<html><button class=\"MuiButtonBase-root bl-w-full justify-content-start\"></button></html>"
                 );
@@ -537,12 +559,19 @@ mod tests {
             json!(null)
         });
         assert_eq!(iframe_reading.detect_mode().await.unwrap(), Some(ActivityKind::Reading));
-        let cross_origin =
-            FakeUnit::new(|code: &str| if code.contains("querySelector('iframe')") { json!(null) } else { json!(0) });
-        assert_eq!(cross_origin.detect_mode().await.unwrap(), Some(ActivityKind::UnreadableFrame));
+        let lti = FakeUnit::new(|code: &str| {
+            if code == IFRAME_COUNT {
+                return json!(1);
+            }
+            if code.starts_with("/*frame 0*/") {
+                return json!("<html><input class=\"quiz-input-sa\"></html>");
+            }
+            json!(null)
+        });
+        assert_eq!(lti.detect_mode().await.unwrap(), Some(ActivityKind::Iframe));
         let native = FakeUnit::new(|code: &str| {
-            if code.contains("querySelector('iframe')") {
-                return json!(false);
+            if code == IFRAME_COUNT {
+                return json!(0);
             }
             if code.contains("outerHTML") {
                 return json!("<button class=\"bl-w-full justify-content-start\">A</button>");
@@ -550,5 +579,27 @@ mod tests {
             json!({ "pills": ["1"], "optionLetters": ["A"] })
         });
         assert_eq!(native.detect_mode().await.unwrap(), Some(ActivityKind::Exercise));
+    }
+
+    #[tokio::test]
+    async fn complete_media_activity_plays_a_video_inside_an_iframe_and_polls_that_frame_until_it_ends() {
+        let status_checks = Cell::new(0);
+        let page = FakeUnit::new(|code: &str| {
+            if code == IFRAME_COUNT {
+                return json!(2);
+            }
+            let in_second_frame = code.starts_with("/*frame 1*/");
+            if code.contains("v.ended") {
+                assert!(in_second_frame, "the ended poll stays in the frame that played: {code}");
+                status_checks.set(status_checks.get() + 1);
+                return json!(status_checks.get() >= 2);
+            }
+            if code.contains("v.play()") {
+                return json!(if in_second_frame { 1 } else { 0 });
+            }
+            json!(0)
+        });
+        assert_eq!(page.complete_media_activity().await.unwrap(), MediaKind::Video);
+        assert_eq!(status_checks.get(), 2);
     }
 }

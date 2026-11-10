@@ -1,12 +1,15 @@
-//! Ports of `src/runners/`. Course and unit are ported; the runners they hand off to
-//! (exercise, iframe, reading, checkpoint) answer `NotPorted` until a later round.
+//! Ports of `src/runners/`. The checkpoint runner answers `NotPorted` until a later round.
 
 pub mod course;
+pub mod exercise;
+pub mod iframe;
+pub mod reading;
 pub mod unit;
 
 use serde_json::{json, Value};
 
-use crate::browser::{Driver, PageResult};
+use crate::browser::{FramedPage, PageResult};
+use crate::config::Config;
 use crate::logger;
 use unit::{ActivityKind, UnitOutcome, UnitPage};
 
@@ -29,13 +32,12 @@ pub enum ActivityOutcome {
     Stuck,
     /// The reading runner left Submit refused.
     Incomplete,
-    NotPorted,
 }
 
 impl ActivityOutcome {
     /// unit.js stops only on these; a stuck or incomplete reading row moves on to the next row.
     pub fn stops_unit(self) -> bool {
-        matches!(self, ActivityOutcome::Unhandled | ActivityOutcome::Incorrect | ActivityOutcome::NotPorted)
+        matches!(self, ActivityOutcome::Unhandled | ActivityOutcome::Incorrect)
     }
 }
 
@@ -47,8 +49,62 @@ impl Report for ActivityOutcome {
             ActivityOutcome::Incorrect => "incorrect",
             ActivityOutcome::Stuck => "stuck",
             ActivityOutcome::Incomplete => "incomplete",
-            ActivityOutcome::NotPorted => "not-ported",
         }
+    }
+}
+
+/// An activity runner's result object: the outcome plus the counters the JS spreads into its log line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActivityReport {
+    pub outcome: ActivityOutcome,
+    pub question_num: Option<u32>,
+    pub slide_num: Option<u32>,
+    pub questions: Option<usize>,
+    pub score: Option<u64>,
+}
+
+impl ActivityReport {
+    pub fn new(outcome: ActivityOutcome) -> Self {
+        ActivityReport { outcome, question_num: None, slide_num: None, questions: None, score: None }
+    }
+
+    pub fn question_num(self, n: u32) -> Self {
+        ActivityReport { question_num: Some(n), ..self }
+    }
+
+    pub fn slide_num(self, n: u32) -> Self {
+        ActivityReport { slide_num: Some(n), ..self }
+    }
+
+    pub fn questions(self, n: usize) -> Self {
+        ActivityReport { questions: Some(n), ..self }
+    }
+
+    pub fn score(self, score: Option<u64>) -> Self {
+        ActivityReport { score, ..self }
+    }
+}
+
+impl Report for ActivityReport {
+    fn status(&self) -> &'static str {
+        self.outcome.status()
+    }
+
+    fn fields(&self) -> Vec<(&'static str, Value)> {
+        let mut fields = vec![("status", json!(self.status()))];
+        if let Some(n) = self.question_num {
+            fields.push(("questionNum", json!(n)));
+        }
+        if let Some(n) = self.slide_num {
+            fields.push(("slideNum", json!(n)));
+        }
+        if let Some(n) = self.questions {
+            fields.push(("questions", json!(n)));
+        }
+        if let Some(score) = self.score {
+            fields.push(("score", json!(score)));
+        }
+        fields
     }
 }
 
@@ -84,7 +140,7 @@ impl Report for CheckpointOutcome {
 /// The runners a unit hands an opened activity to.
 #[allow(async_fn_in_trait)]
 pub trait ActivityRunners<P> {
-    async fn run(&mut self, kind: ActivityKind, page: &P) -> PageResult<ActivityOutcome>;
+    async fn run(&mut self, kind: ActivityKind, page: &P) -> PageResult<ActivityReport>;
 }
 
 /// The runners a course hands an opened node to.
@@ -94,20 +150,25 @@ pub trait CourseNodeRunners<P> {
     async fn checkpoint(&mut self, page: &P) -> PageResult<CheckpointOutcome>;
 }
 
-/// The runners as far as the Rust port goes today.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Ported;
+/// The runners as far as the Rust port goes: every activity runner, no checkpoint yet.
+#[derive(Debug, Clone)]
+pub struct Live {
+    pub config: Config,
+}
 
-impl<P: Driver> ActivityRunners<P> for Ported {
-    async fn run(&mut self, kind: ActivityKind, _page: &P) -> PageResult<ActivityOutcome> {
-        logger::warn("Activity runner is not ported to Rust yet", [("mode", json!(kind.name()))]);
-        Ok(ActivityOutcome::NotPorted)
+impl<P: FramedPage> ActivityRunners<P> for Live {
+    async fn run(&mut self, kind: ActivityKind, page: &P) -> PageResult<ActivityReport> {
+        match kind {
+            ActivityKind::Exercise => exercise::run(page, &self.config).await,
+            ActivityKind::Iframe => iframe::run(page, &self.config).await,
+            ActivityKind::Reading => reading::run(page).await,
+        }
     }
 }
 
-impl<P: UnitPage> CourseNodeRunners<P> for Ported {
+impl<P: UnitPage> CourseNodeRunners<P> for Live {
     async fn unit(&mut self, page: &P) -> PageResult<UnitOutcome> {
-        unit::run(page, &mut Ported).await
+        unit::run(page, self).await
     }
 
     async fn checkpoint(&mut self, _page: &P) -> PageResult<CheckpointOutcome> {

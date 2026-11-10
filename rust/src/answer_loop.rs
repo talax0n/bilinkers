@@ -6,8 +6,8 @@ use std::num::NonZeroU32;
 use serde_json::{json, Value};
 
 use crate::js;
-use crate::logger;
 use crate::llm::{LlmError, NotSignedIn};
+use crate::logger;
 use crate::question_types::Dom;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,7 +75,12 @@ impl<D, F> Answerer<D> for F
 where
     F: FnMut(&str, &D, Option<&str>) -> Result<Value, LlmError>,
 {
-    async fn answer(&mut self, instruction: &str, question_data: &D, feedback: Option<&str>) -> Result<Value, LlmError> {
+    async fn answer(
+        &mut self,
+        instruction: &str,
+        question_data: &D,
+        feedback: Option<&str>,
+    ) -> Result<Value, LlmError> {
         self(instruction, question_data, feedback)
     }
 }
@@ -138,17 +143,23 @@ fn tried_answers(result: &Value) -> Result<Vec<Value>, String> {
     }
 }
 
+/// What one attempt asks the answerer.
+struct Prompt<'a> {
+    instruction: &'a str,
+    feedback: Option<&'a str>,
+    number: u32,
+}
+
 /// One answer attempt. `Ok` carries the check; `Err` is the JS catch path.
 async fn attempt<H: Handler, A: Answerer<H::Data>, S: Sleeper>(
     handler: &mut H,
     dom: &Dom,
     question_data: &H::Data,
-    instruction: &str,
-    feedback: Option<&str>,
+    prompt: Prompt<'_>,
     answerer: &mut A,
     sleeper: &mut S,
-    number: u32,
 ) -> Result<(Value, Check), LlmError> {
+    let Prompt { instruction, feedback, number } = prompt;
     let result = call_with_retry(
         async || answerer.answer(instruction, question_data, feedback).await,
         sleeper,
@@ -165,8 +176,7 @@ async fn attempt<H: Handler, A: Answerer<H::Data>, S: Sleeper>(
     );
     handler.answer(&result).await?;
     let check = handler.check_result(dom).await?;
-    let mut fields =
-        vec![("handler", json!(handler.name())), ("attempt", json!(number)), ("answer", attempted)];
+    let mut fields = vec![("handler", json!(handler.name())), ("attempt", json!(number)), ("answer", attempted)];
     fields.push(("outcome", json!(check.outcome.name())));
     if let Some(hint) = check.hint.as_deref().filter(|h| !h.is_empty()) {
         fields.push(("hint", json!(hint)));
@@ -202,9 +212,9 @@ pub async fn process_question<H: Handler, A: Answerer<H::Data>, S: Sleeper>(
         if attempts > 0 {
             sleeper.sleep(100, 100).await;
         }
-        let result = attempt(handler, dom, &question_data, instruction, feedback.as_deref(), answerer, sleeper, attempts + 1)
-            .await
-            .and_then(|(answer, check)| {
+        let prompt = Prompt { instruction, feedback: feedback.as_deref(), number: attempts + 1 };
+        let result =
+            attempt(handler, dom, &question_data, prompt, answerer, sleeper).await.and_then(|(answer, check)| {
                 if check.outcome == Outcome::Incorrect {
                     for t in tried_answers(&answer)? {
                         if !tried.iter().any(|seen| js::same_value_zero(seen, &t)) {
@@ -312,7 +322,8 @@ mod tests {
             },
             check: || Check::from_raw("correct"),
         };
-        let result = process_question(Some(&mut handler), &Dom::default(), "instr", 1, &mut always_a, &mut NoSleep).await;
+        let result =
+            process_question(Some(&mut handler), &Dom::default(), "instr", 1, &mut always_a, &mut NoSleep).await;
         assert_eq!(result, Ok(QuestionResult::Finished { outcome: Outcome::Correct, attempts: 1 }));
         assert_eq!(answer_calls.len(), 1);
     }
@@ -325,7 +336,8 @@ mod tests {
             feedbacks.push(feedback.map(String::from));
             Ok(json!({ "answer": "A" }))
         };
-        let result = process_question(Some(&mut handler), &Dom::default(), "instr", 1, &mut answerer, &mut NoSleep).await;
+        let result =
+            process_question(Some(&mut handler), &Dom::default(), "instr", 1, &mut answerer, &mut NoSleep).await;
         assert_eq!(result, Ok(QuestionResult::Finished { outcome: Outcome::Incorrect, attempts: 2 }));
         assert_eq!(
             feedbacks,
@@ -356,7 +368,8 @@ mod tests {
             call += 1;
             Ok(json!({ "answer": if call == 1 { "A" } else { "B" } }))
         };
-        let result = process_question(Some(&mut handler), &Dom::default(), "instr", 1, &mut answerer, &mut NoSleep).await;
+        let result =
+            process_question(Some(&mut handler), &Dom::default(), "instr", 1, &mut answerer, &mut NoSleep).await;
         assert_eq!(result, Ok(QuestionResult::Finished { outcome: Outcome::Incorrect, attempts: 2 }));
         assert_eq!(answers_tried, vec![json!("A"), json!("B")]);
         assert_eq!(
@@ -372,14 +385,16 @@ mod tests {
     async fn process_question_treats_a_throwing_handler_as_incorrect_and_still_respects_retry_limit() {
         let mut handler =
             FakeHandler { answer: |_: &Value| Err("stale element".to_string()), check: || Check::from_raw("correct") };
-        let result = process_question(Some(&mut handler), &Dom::default(), "instr", 1, &mut always_a, &mut NoSleep).await;
+        let result =
+            process_question(Some(&mut handler), &Dom::default(), "instr", 1, &mut always_a, &mut NoSleep).await;
         assert_eq!(result, Ok(QuestionResult::Finished { outcome: Outcome::Incorrect, attempts: 2 }));
     }
 
     #[tokio::test]
     async fn process_question_treats_an_unexpected_check_result_value_as_incorrect() {
         let mut handler = FakeHandler { answer: |_: &Value| Ok(()), check: || Check::from_raw("not-a-real-status") };
-        let result = process_question(Some(&mut handler), &Dom::default(), "instr", 0, &mut always_a, &mut NoSleep).await;
+        let result =
+            process_question(Some(&mut handler), &Dom::default(), "instr", 0, &mut always_a, &mut NoSleep).await;
         assert_eq!(result, Ok(QuestionResult::Finished { outcome: Outcome::Incorrect, attempts: 1 }));
     }
 

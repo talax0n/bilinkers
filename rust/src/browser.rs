@@ -138,9 +138,14 @@ impl Driver for Page {
 /// A page whose activity may render inside an iframe.
 #[allow(async_fn_in_trait)]
 pub trait FramedPage: Driver {
-    /// `executeScript` in the first iframe's document, looked up fresh on every call.
-    /// Fails when there is no iframe or its document is between loads.
-    async fn execute_in_frame(&self, body: &str, args: &[Value]) -> PageResult<Value>;
+    /// `executeScript` in the `index`th iframe's document, looked up fresh on every call.
+    /// Fails when there is no such iframe or its document is between loads.
+    async fn execute_in_frame_at(&self, index: usize, body: &str, args: &[Value]) -> PageResult<Value>;
+
+    /// `switchTo().frame(iframes[0])` then `executeScript`.
+    async fn execute_in_frame(&self, body: &str, args: &[Value]) -> PageResult<Value> {
+        self.execute_in_frame_at(0, body, args).await
+    }
 
     /// `driver.navigate().refresh()`.
     async fn reload(&self) -> PageResult<()>;
@@ -209,8 +214,8 @@ impl Driver for Lms {
 }
 
 impl FramedPage for Lms {
-    async fn execute_in_frame(&self, body: &str, args: &[Value]) -> PageResult<Value> {
-        self.frames.execute(&self.browser, &self.page, body, args).await
+    async fn execute_in_frame_at(&self, index: usize, body: &str, args: &[Value]) -> PageResult<Value> {
+        self.frames.execute(&self.browser, &self.page, index, body, args).await
     }
 
     async fn reload(&self) -> PageResult<()> {
@@ -413,7 +418,7 @@ pub(crate) mod fake {
     }
 
     impl<F: FnMut(Scope, &str, &[Value]) -> PageResult<Value>> FramedPage for FakePage<F> {
-        async fn execute_in_frame(&self, body: &str, args: &[Value]) -> PageResult<Value> {
+        async fn execute_in_frame_at(&self, _index: usize, body: &str, args: &[Value]) -> PageResult<Value> {
             self.calls.borrow_mut().push(Call::Frame(body.to_string()));
             (self.script.borrow_mut())(Scope::Frame, body, args)
         }
@@ -430,8 +435,8 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn get_current_question_dom_treats_absent_iframe_body_during_reload_as_not_ready_and_retries_fresh_iframe_lookup()
-    {
+    async fn get_current_question_dom_treats_absent_iframe_body_during_reload_as_not_ready_and_retries_fresh_iframe_lookup(
+    ) {
         let mut readiness_checks = 0;
         let page = FakePage::new(|scope: Scope, script: &str, _: &[Value]| {
             if script == IFRAME_COUNT {
@@ -489,7 +494,8 @@ mod tests {
                 _ => json!(true),
             })
         });
-        let result = get_current_question_dom(&page, DomWait { iframe_poll_ms: 1, ..DomWait::iframe_wait(0) }).await.unwrap();
+        let result =
+            get_current_question_dom(&page, DomWait { iframe_poll_ms: 1, ..DomWait::iframe_wait(0) }).await.unwrap();
         assert_eq!(result.scope, Scope::Top);
         assert!(!result.dom.inside_iframe);
         assert_eq!(result.dom.outer_html, "<html>top</html>");

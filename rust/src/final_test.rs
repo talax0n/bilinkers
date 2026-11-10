@@ -395,7 +395,8 @@ mod tests {
             calls += 1;
             Err(LlmError::Failed("boom".to_string()))
         };
-        let result = answer_with_retry(&mut answerer, &question(), NonZeroU32::new(3).unwrap(), &mut NoSleep, None).await;
+        let result =
+            answer_with_retry(&mut answerer, &question(), NonZeroU32::new(3).unwrap(), &mut NoSleep, None).await;
         assert_eq!(result, Fresh { answer: FinalAnswer::NeedsReview, confidence: 0.0 });
         assert_eq!(calls, 3);
     }
@@ -410,7 +411,8 @@ mod tests {
             }
             Ok(json!({ "answer": "D", "confidence": 0.8 }))
         };
-        let result = answer_with_retry(&mut answerer, &question(), NonZeroU32::new(3).unwrap(), &mut NoSleep, None).await;
+        let result =
+            answer_with_retry(&mut answerer, &question(), NonZeroU32::new(3).unwrap(), &mut NoSleep, None).await;
         assert_eq!(result, Fresh { answer: given("D"), confidence: 0.8 });
         assert_eq!(calls, 2);
     }

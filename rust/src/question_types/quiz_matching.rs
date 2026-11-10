@@ -77,9 +77,9 @@ pub async fn check_result<D: Driver>(driver: &D) -> Result<Check, String> {
     })
     .await
     .map_err(|e| e.0)?;
-    outcome
-        .map(Check::new)
-        .ok_or_else(|| "quizMatching checkResult: timed out waiting for Continue link or incorrect feedback".to_string())
+    outcome.map(Check::new).ok_or_else(|| {
+        "quizMatching checkResult: timed out waiting for Continue link or incorrect feedback".to_string()
+    })
 }
 
 #[cfg(test)]

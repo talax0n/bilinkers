@@ -151,7 +151,7 @@ pub trait CoursePage: Driver {
     }
 }
 
-impl CoursePage for chromiumoxide::Page {}
+impl CoursePage for crate::browser::Lms {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodeOutcome {
@@ -389,6 +389,15 @@ mod tests {
         }
     }
 
+    impl crate::browser::FramedPage for FakeCourse {
+        async fn execute_in_frame_at(&self, _index: usize, _body: &str, _args: &[Value]) -> PageResult<Value> {
+            unreachable!("no activity is opened in these tests")
+        }
+        async fn reload(&self) -> PageResult<()> {
+            Ok(())
+        }
+    }
+
     impl crate::runners::unit::UnitPage for FakeCourse {
         async fn click_row(&self, _title: &str) -> PageResult<bool> {
             unreachable!("no unit node is opened in these tests")
@@ -566,7 +575,10 @@ mod tests {
             vec![node(NodeKind::Checkpoint, 1, 500.0, "Checkpoint1")],
             Progress { unit: count(2, 2), checkpoint: count(0, 1) },
         );
-        let result = run(&page, &mut super::super::Ported, quick()).await.unwrap();
+        let result =
+            run(&page, &mut super::super::Live { config: crate::config::build_config(&Default::default()) }, quick())
+                .await
+                .unwrap();
         assert_eq!(
             result,
             CourseOutcome::Stuck(CourseStuck::NodeFailed {

@@ -131,9 +131,16 @@ impl Answerer<ErrorAnalysisData> for BruteForceAnswerer {
 
 /// The iframe runner hands every type the parsed enum; only errorAnalysis data has candidates.
 impl Answerer<QuestionData> for BruteForceAnswerer {
-    async fn answer(&mut self, instruction: &str, data: &QuestionData, feedback: Option<&str>) -> Result<Value, LlmError> {
+    async fn answer(
+        &mut self,
+        instruction: &str,
+        data: &QuestionData,
+        feedback: Option<&str>,
+    ) -> Result<Value, LlmError> {
         match data {
-            QuestionData::ErrorAnalysis(data) => Answerer::<ErrorAnalysisData>::answer(self, instruction, data, feedback).await,
+            QuestionData::ErrorAnalysis(data) => {
+                Answerer::<ErrorAnalysisData>::answer(self, instruction, data, feedback).await
+            }
             _ => Err(LlmError::Failed("errorAnalysis brute force: question data has no candidates".to_string())),
         }
     }

@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use chromiumoxide::cdp::browser_protocol::target::{
-    AttachToTargetParams, DetachFromTargetParams, EventReceivedMessageFromTarget, GetTargetsParams, SessionId,
-    TargetId,
+    AttachToTargetParams, DetachFromTargetParams, EventDetachedFromTarget, EventReceivedMessageFromTarget,
+    GetTargetsParams, SessionId, TargetId,
 };
 use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
 use chromiumoxide::listeners::EventStream;
@@ -28,13 +28,13 @@ pub fn wrap_script(body: &str, args: &[Value]) -> String {
 
 /// Same-origin frames: build the function in the frame's own realm, so `document` is the frame's.
 const SAME_ORIGIN_EVAL: &str = r#"
-  const frame = document.querySelector('iframe');
+  const frame = document.querySelectorAll('iframe')[arguments[2]];
   if (!frame) throw new Error('no iframe');
   return frame.contentWindow.Function(arguments[0]).apply(null, arguments[1]);
 "#;
 
-const FIRST_IFRAME_ORIGIN: &str = r#"
-  const frame = document.querySelector('iframe');
+const IFRAME_ORIGIN: &str = r#"
+  const frame = document.querySelectorAll('iframe')[arguments[0]];
   if (!frame) return 'none';
   try { if (frame.contentDocument) return 'same'; } catch (e) {}
   return 'cross';
@@ -66,6 +66,15 @@ struct Session {
     target: TargetId,
     id: SessionId,
     messages: EventStream<EventReceivedMessageFromTarget>,
+    detaches: EventStream<EventDetachedFromTarget>,
+}
+
+/// Why an evaluate in the iframe failed.
+enum EvalError {
+    /// The session is gone or never answered; the script may not have run.
+    Transport(PageError),
+    /// The script ran and threw, so it must not be run again.
+    Page(PageError),
 }
 
 /// One attached session to the iframe target, re-attached when the iframe is replaced.
@@ -83,17 +92,26 @@ impl Default for FrameEvaluator {
 }
 
 impl FrameEvaluator {
-    /// Runs `body` in the first iframe's document of `page`.
-    pub async fn execute(&self, browser: &Browser, page: &Page, body: &str, args: &[Value]) -> PageResult<Value> {
-        match evaluate_top(page, FIRST_IFRAME_ORIGIN, &[]).await?.as_str() {
-            Some("same") => evaluate_top(page, SAME_ORIGIN_EVAL, &[json!(body), Value::from(args.to_vec())]).await,
-            Some("cross") => self.execute_cross(browser, page, &wrap_script(body, args)).await,
+    /// Runs `body` in the document of the page's `index`th iframe, looked up fresh on every call.
+    pub async fn execute(
+        &self,
+        browser: &Browser,
+        page: &Page,
+        index: usize,
+        body: &str,
+        args: &[Value],
+    ) -> PageResult<Value> {
+        match evaluate_top(page, IFRAME_ORIGIN, &[json!(index)]).await?.as_str() {
+            Some("same") => {
+                evaluate_top(page, SAME_ORIGIN_EVAL, &[json!(body), Value::from(args.to_vec()), json!(index)]).await
+            }
+            Some("cross") => self.execute_cross(browser, page, index, &wrap_script(body, args)).await,
             _ => Err(PageError("no iframe".to_string())),
         }
     }
 
-    async fn execute_cross(&self, browser: &Browser, page: &Page, expression: &str) -> PageResult<Value> {
-        let target = frame_target(browser, page).await?;
+    async fn execute_cross(&self, browser: &Browser, page: &Page, index: usize, expression: &str) -> PageResult<Value> {
+        let target = frame_target(browser, page, index).await?;
         let mut guard = self.session.lock().await;
         if guard.as_ref().is_none_or(|s| s.target != target) {
             if let Some(old) = guard.take() {
@@ -104,46 +122,69 @@ impl FrameEvaluator {
         let session = guard.as_mut().expect("attached above");
         match self.evaluate(browser, session, expression).await {
             Ok(value) => Ok(value),
+            Err(EvalError::Page(e)) => Err(e),
             // A cross-process navigation inside the iframe ends the session; attach once more.
-            Err(_) => {
+            Err(EvalError::Transport(_)) => {
                 *guard = Some(attach(browser, target).await?);
                 let session = guard.as_mut().expect("attached above");
-                self.evaluate(browser, session, expression).await
+                self.evaluate(browser, session, expression)
+                    .await
+                    .map_err(|(EvalError::Page(e) | EvalError::Transport(e))| e)
             }
         }
     }
 
-    async fn evaluate(&self, browser: &Browser, session: &mut Session, expression: &str) -> PageResult<Value> {
+    async fn evaluate(&self, browser: &Browser, session: &mut Session, expression: &str) -> Result<Value, EvalError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let message = json!({
             "id": id,
             "method": "Runtime.evaluate",
             "params": { "expression": expression, "returnByValue": true, "awaitPromise": false },
         });
-        browser.execute(SendMessageToTarget { session_id: session.id.clone(), message: message.to_string() }).await?;
-        let reply = tokio::time::timeout(REPLY_TIMEOUT, async {
-            while let Some(event) = session.messages.next().await {
-                if event.session_id != session.id {
-                    continue;
-                }
-                let Ok(reply) = serde_json::from_str::<Value>(&event.message) else { continue };
-                if reply["id"] == json!(id) {
-                    return Some(reply);
+        browser
+            .execute(SendMessageToTarget { session_id: session.id.clone(), message: message.to_string() })
+            .await
+            .map_err(|e| EvalError::Transport(e.into()))?;
+        let session_id = session.id.clone();
+        let wait = async {
+            loop {
+                tokio::select! {
+                    event = session.messages.next() => {
+                        let event = event?;
+                        if event.session_id != session_id {
+                            continue;
+                        }
+                        let Ok(reply) = serde_json::from_str::<Value>(&event.message) else { continue };
+                        if reply["id"] == json!(id) {
+                            return Some(reply);
+                        }
+                    }
+                    detach = session.detaches.next() => {
+                        if detach?.session_id == session_id {
+                            return None;
+                        }
+                    }
                 }
             }
-            None
-        })
-        .await
-        .ok()
-        .flatten()
-        .ok_or_else(|| PageError("iframe did not answer the evaluate".to_string()))?;
-        evaluation_value(&reply)
+        };
+        let reply = tokio::time::timeout(REPLY_TIMEOUT, wait)
+            .await
+            .ok()
+            .flatten()
+            .ok_or_else(|| EvalError::Transport(PageError("iframe did not answer the evaluate".to_string())))?;
+        if reply.get("error").is_some() {
+            // A protocol error (no context yet, target gone) means the script did not run.
+            return Err(EvalError::Transport(PageError(format!("iframe evaluate failed: {}", reply["error"]))));
+        }
+        evaluation_value(&reply).map_err(EvalError::Page)
     }
 }
 
-/// The first iframe element's frame id, which is also its out-of-process target id.
-async fn frame_target(browser: &Browser, page: &Page) -> PageResult<TargetId> {
-    let node = page.find_element("iframe").await?.description().await?;
+/// The iframe element's frame id, which is also its out-of-process target id.
+async fn frame_target(browser: &Browser, page: &Page, index: usize) -> PageResult<TargetId> {
+    let frames = page.find_elements("iframe").await?;
+    let frame = frames.get(index).ok_or_else(|| PageError("no iframe".to_string()))?;
+    let node = frame.description().await?;
     let frame_id = node.frame_id.ok_or_else(|| PageError("iframe has no frame id".to_string()))?;
     let target = TargetId::new(frame_id.inner().clone());
     let targets = browser.execute(GetTargetsParams::default()).await?.result.target_infos;
@@ -157,9 +198,10 @@ async fn frame_target(browser: &Browser, page: &Page) -> PageResult<TargetId> {
 async fn attach(browser: &Browser, target: TargetId) -> PageResult<Session> {
     // Subscribe first so no reply can arrive before the stream exists.
     let messages = browser.event_listener::<EventReceivedMessageFromTarget>().await?;
+    let detaches = browser.event_listener::<EventDetachedFromTarget>().await?;
     let params = AttachToTargetParams::builder().target_id(target.clone()).flatten(false).build().map_err(PageError)?;
     let id = browser.execute(params).await?.result.session_id;
-    Ok(Session { target, id, messages })
+    Ok(Session { target, id, messages, detaches })
 }
 
 /// A `Runtime.evaluate` reply as JSON: the by-value result, or the page exception as an error.

@@ -105,7 +105,9 @@ async fn reset_if_locked<P: FramedPage>(driver: &Scoped<'_, P>) -> Result<(), Pa
     driver.page.reload().await?;
     let reloaded = get_current_question_dom(driver.page, DomWait::default()).await?;
     if js::truthy(&hash) {
-        Scoped::new(driver.page, reloaded.scope).execute_script("window.location.hash = arguments[0];", &[hash]).await?;
+        Scoped::new(driver.page, reloaded.scope)
+            .execute_script("window.location.hash = arguments[0];", &[hash])
+            .await?;
         driver.sleep(1500).await;
     }
     Ok(())

@@ -92,6 +92,14 @@ pub fn error<'a>(message: &str, fields: impl IntoIterator<Item = (&'a str, Value
     log(Level::Error, message, fields);
 }
 
+/// Writes `<dir>/<name>.html` for a page no handler recognised and returns its path.
+pub fn save_unhandled(dir: &str, name: &str, html: &str) -> std::io::Result<std::path::PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let path = std::path::Path::new(dir).join(format!("{name}.html"));
+    std::fs::write(&path, html)?;
+    Ok(path)
+}
+
 /// `Date.prototype.toISOString`: `2026-11-10T09:30:00.123Z`.
 pub fn iso_time(time: SystemTime) -> String {
     let since = time.duration_since(UNIX_EPOCH).unwrap_or_default();

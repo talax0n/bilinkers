@@ -110,9 +110,56 @@ pub fn build_config(env: &HashMap<String, String>) -> Config {
     }
 }
 
+/// `KEY=VALUE` lines of a `.env` file, as dotenv reads them: `#` comments, optional `export`,
+/// and one layer of matching quotes.
+pub fn parse_dotenv(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            let line = line.strip_prefix("export ").unwrap_or(line);
+            let (key, value) = line.split_once('=')?;
+            let value = value.trim();
+            let quoted = value.len() >= 2
+                && (value.starts_with('"') && value.ends_with('"') || value.starts_with('\'') && value.ends_with('\''));
+            let value = if quoted {
+                &value[1..value.len() - 1]
+            } else {
+                value.split_once(" #").map_or(value, |(v, _)| v).trim_end()
+            };
+            Some((key.trim().to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+/// The process environment plus `.env` entries it does not already set, like `dotenv.config()`.
+pub fn environment(dotenv: Option<&str>) -> HashMap<String, String> {
+    let mut env: HashMap<String, String> = std::env::vars().collect();
+    for (key, value) in dotenv.map(parse_dotenv).unwrap_or_default() {
+        env.entry(key).or_insert(value);
+    }
+    env
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_dotenv_reads_plain_quoted_and_commented_lines() {
+        let text = "# comment\nLLM_PROVIDER=openai\nexport BROWSER=brave\nPATHY=\"/Applications/Brave Browser.app\"\nX=1 # note\n\nbad line\n";
+        assert_eq!(
+            parse_dotenv(text),
+            vec![
+                ("LLM_PROVIDER".to_string(), "openai".to_string()),
+                ("BROWSER".to_string(), "brave".to_string()),
+                ("PATHY".to_string(), "/Applications/Brave Browser.app".to_string()),
+                ("X".to_string(), "1".to_string()),
+            ]
+        );
+    }
 
     fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
