@@ -1,6 +1,11 @@
+const { execFile } = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const OpenAI = require('openai');
 
 function createClient(config) {
+  if (config.llmProvider === 'codex') return { codex: { model: config.codex.model } };
   if ((config.llmProvider || 'openai') === 'gemini') {
     const { GoogleGenerativeAI } = require('@google/generative-ai');
     return new GoogleGenerativeAI(config.gemini.apiKey);
@@ -27,8 +32,33 @@ function parseJsonContent(content, label) {
   }
 }
 
+// Goes through the Codex CLI so the call rides the user's own `codex login`
+// (ChatGPT OAuth). The bot never sees or stores a token.
+function askCodex(model, prompt) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'beelingua-codex-'));
+  const out = path.join(dir, 'answer.txt');
+  const args = ['exec', '--skip-git-repo-check', '--ephemeral', '--sandbox', 'read-only', '-C', dir, '--color', 'never', '-o', out];
+  if (model) args.push('-m', model);
+  args.push('-');
+  return new Promise((resolve, reject) => {
+    const child = execFile('codex', args, { timeout: 120000, maxBuffer: 10 * 1024 * 1024 }, (err, _stdout, stderr) => {
+      try {
+        if (err) reject(new Error(`codex exec failed: ${String(stderr || err.message).trim().split('\n').pop()}`));
+        else resolve(fs.readFileSync(out, 'utf8'));
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+    child.stdin.end(prompt);
+  });
+}
+
 async function answerQuestion(client, model, instruction, questionData, feedback = null) {
   const userPrompt = JSON.stringify({ instruction, questionData, feedback });
+
+  if (client.codex) {
+    return parseJsonContent(await askCodex(client.codex.model, `${SYSTEM_PROMPT}\n\n${userPrompt}`), 'LLM');
+  }
 
   // GoogleGenerativeAI client, detected by shape (Gemini has no chat.completions API).
   if (typeof client.getGenerativeModel === 'function') {

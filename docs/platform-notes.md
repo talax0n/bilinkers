@@ -302,6 +302,7 @@ Each handler exposes `detect`, `parse`, `answer` and `checkResult` (src/question
 
 ## LLM and the answer loop
 
+- The default provider is `codex`. Each question runs `codex exec --ephemeral --sandbox read-only -o <file> -` with the prompt on stdin, so the call uses the user's own `codex login` (ChatGPT OAuth) and no key is stored. About 8 to 10 s per call. Verified live 2026-11-10 on C2.2 Unit 1 Interactive Grammar Activity (5 of 5 fill-in-blank correct on the first try). (src/llm.js, askCodex)
 Provider calls (src/llm.js):
 
 - `LLM_PROVIDER` is `openai` (default, any OpenAI-compatible endpoint via `OPENAI_BASE_URL`) or `gemini`. A Gemini client is detected by having `getGenerativeModel`, since it has no `chat.completions` API.

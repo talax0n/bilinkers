@@ -83,3 +83,29 @@ test('answerQuestion routes to Gemini when client has getGenerativeModel', async
   assert.deepEqual(result, { answer: 'went' });
   assert.equal(calls[0].model, 'gemini-1.5-flash');
 });
+
+test('answerQuestion with the codex client runs `codex exec` and parses its last message', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { createClient } = require('../src/llm');
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'fake-codex-'));
+  const log = path.join(bin, 'calls.txt');
+  fs.writeFileSync(
+    path.join(bin, 'codex'),
+    `#!/bin/sh\necho "$@" > ${log}\ncat >> ${log}\nwhile [ "$1" != "-o" ]; do shift; done\nprintf '{"answer":"had started"}' > "$2"\n`,
+    { mode: 0o755 }
+  );
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${bin}:${savedPath}`;
+  try {
+    const client = createClient({ llmProvider: 'codex', codex: { model: 'gpt-5' } });
+    const result = await answerQuestion(client, 'ignored', 'Fill the blank', { text: 'the film ___ (start)' });
+    assert.deepEqual(result, { answer: 'had started' });
+    const call = fs.readFileSync(log, 'utf8');
+    assert.match(call, /^exec --skip-git-repo-check --ephemeral --sandbox read-only -C \S+ --color never -o \S+ -m gpt-5 -\n/);
+    assert.match(call, /"instruction":"Fill the blank"/);
+  } finally {
+    process.env.PATH = savedPath;
+  }
+});

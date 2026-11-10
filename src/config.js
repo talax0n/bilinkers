@@ -10,7 +10,10 @@ function parseNonNegativeInteger(value, fallback) {
 
 function buildConfig(env) {
   return {
-    llmProvider: env.LLM_PROVIDER || 'openai',
+    llmProvider: env.LLM_PROVIDER || 'codex',
+    codex: {
+      model: env.CODEX_MODEL || '',
+    },
     openai: {
       baseURL: env.OPENAI_BASE_URL,
       apiKey: env.OPENAI_API_KEY,

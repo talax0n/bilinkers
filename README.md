@@ -49,7 +49,8 @@ cp .env.example .env
 
 | Variable | Description |
 |---|---|
-| `LLM_PROVIDER` | `openai` (default) or `gemini` |
+| `LLM_PROVIDER` | `codex` (default; signs in through your `codex login`, no API key), `openai`, or `gemini` |
+| `CODEX_MODEL` | Model for `codex exec` (empty uses the Codex CLI default) |
 | `OPENAI_API_KEY` | API key for your LLM provider (used when `LLM_PROVIDER=openai`) |
 | `OPENAI_BASE_URL` | Base URL of the OpenAI-compatible endpoint |
 | `OPENAI_MODEL` | Model name to use (defaults to `gpt-4o`) |
