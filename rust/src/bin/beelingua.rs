@@ -1,6 +1,7 @@
 //! Port of `src/cli.js`: `beelingua [mode] [url]`. Launches the browser with a debug port
 //! unless one already answers, then attaches and runs the mode, auto-detected when omitted.
 
+use std::collections::HashMap;
 use std::io::{BufRead, IsTerminal, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
@@ -13,12 +14,14 @@ use beelingua::detect::{detect_mode, PageMode};
 use beelingua::logger;
 use beelingua::runners::course::{self, CourseOptions};
 use beelingua::runners::unit::{self, UnitPage};
-use beelingua::runners::{checkpoint, exercise, iframe, reading, Live, Report};
+use beelingua::runners::{checkpoint, exercise, final_test_runner, iframe, reading, Live, Report};
 use serde_json::{json, Value};
 
-const USAGE: &str = "usage: beelingua [course|unit|exercise|iframe|reading|checkpoint] [url]
+const USAGE: &str = "usage: beelingua [course|unit|exercise|iframe|reading|checkpoint|final-test] [url]
        beelingua attach | open-row \"<row title>\" | eval-frame \"<script>\"
-Env: CDP_PORT (default 9222), BROWSER (chrome|brave|edge), BROWSER_BINARY_PATH, LLM_PROVIDER=codex";
+Env: CDP_PORT (default 9222), BROWSER (chrome|brave|edge), BROWSER_BINARY_PATH, LLM_PROVIDER=codex
+final-test is read-only unless FINAL_TEST_AUTO_ANSWER=1 or FINAL_TEST_GUESS_LISTENING=1
+(FINAL_TEST_CONFIDENCE_THRESHOLD, FINAL_TEST_REVIEWS_REQUIRED). It never clicks Submit.";
 
 const DEFAULT_URL: &str = "https://lms.binus.ac.id";
 
@@ -30,6 +33,7 @@ enum RunMode {
     Iframe,
     Reading,
     Checkpoint,
+    FinalTest,
 }
 
 impl RunMode {
@@ -41,6 +45,7 @@ impl RunMode {
             "iframe" => Some(RunMode::Iframe),
             "reading" => Some(RunMode::Reading),
             "checkpoint" => Some(RunMode::Checkpoint),
+            "final-test" => Some(RunMode::FinalTest),
             _ => None,
         }
     }
@@ -83,7 +88,6 @@ fn parse_args(args: &[String]) -> Result<Mode, String> {
         Some("open-row") => second.map(|title| Mode::OpenRow { title }).ok_or_else(|| USAGE.to_string()),
         Some("eval-frame") => second.map(|script| Mode::EvalFrame { script }).ok_or_else(|| USAGE.to_string()),
         Some("-h" | "--help" | "help") => Err(USAGE.to_string()),
-        Some("final-test") => Err("The final-test runner is not ported to Rust yet.".to_string()),
         Some(arg) => match RunMode::parse(arg) {
             Some(mode) => Ok(Mode::Run { mode: Some(mode), url: second.unwrap_or_else(|| DEFAULT_URL.to_string()) }),
             // Like cli.js, an unknown first argument is the start URL.
@@ -111,7 +115,7 @@ fn cdp_answers(port: u16) -> bool {
 }
 
 /// cli.js resolveBinaryPath: BROWSER_BINARY_PATH (or CHROME_BINARY_PATH), else the platform default.
-fn resolve_binary_path(env: &std::collections::HashMap<String, String>) -> Result<String, String> {
+fn resolve_binary_path(env: &HashMap<String, String>) -> Result<String, String> {
     let explicit = env.get("BROWSER_BINARY_PATH").or_else(|| env.get("CHROME_BINARY_PATH")).filter(|p| !p.is_empty());
     if let Some(path) = explicit {
         if !Path::new(path).exists() {
@@ -144,7 +148,7 @@ fn resolve_binary_path(env: &std::collections::HashMap<String, String>) -> Resul
 }
 
 /// Starts the browser with the debug port unless one already answers. True when it launched one.
-fn ensure_browser(env: &std::collections::HashMap<String, String>, port: u16, url: &str) -> Result<bool, String> {
+fn ensure_browser(env: &HashMap<String, String>, port: u16, url: &str) -> Result<bool, String> {
     if cdp_answers(port) {
         return Ok(false);
     }
@@ -180,7 +184,12 @@ fn wait_for_port(port: u16, timeout: Duration) -> bool {
     false
 }
 
-async fn run_mode(mode: RunMode, lms: &Lms, config: &Config) -> Result<Vec<(&'static str, Value)>, String> {
+async fn run_mode(
+    mode: RunMode,
+    lms: &Lms,
+    config: &Config,
+    env: &HashMap<String, String>,
+) -> Result<Vec<(&'static str, Value)>, String> {
     let mut runners = Live { config: config.clone() };
     let fields = match mode {
         RunMode::Course => course::run(lms, &mut runners, CourseOptions::default()).await.map(|o| o.fields()),
@@ -189,6 +198,7 @@ async fn run_mode(mode: RunMode, lms: &Lms, config: &Config) -> Result<Vec<(&'st
         RunMode::Iframe => iframe::run(lms, config).await.map(|o| o.fields()),
         RunMode::Reading => reading::run(lms).await.map(|o| o.fields()),
         RunMode::Checkpoint => checkpoint::run(lms, &mut checkpoint::LiveAttempt).await.map(|o| o.fields()),
+        RunMode::FinalTest => final_test_runner::run(lms, config, env).await.map(|o| o.fields()),
     };
     fields.map_err(|e| e.to_string())
 }
@@ -269,7 +279,7 @@ async fn main() {
         }
     };
 
-    match run_mode(run, &lms, &config).await {
+    match run_mode(run, &lms, &config, &env).await {
         Ok(fields) => logger::info("Run finished", fields),
         Err(e) => {
             logger::error("Run failed", [("error", json!(e))]);
@@ -301,5 +311,9 @@ mod tests {
             Ok(Mode::Run { mode: Some(RunMode::Checkpoint), url: DEFAULT_URL.to_string() })
         );
         assert_eq!(RunMode::from_detected(PageMode::Checkpoint), RunMode::Checkpoint);
+        assert_eq!(
+            parse_args(&args(&["final-test"])),
+            Ok(Mode::Run { mode: Some(RunMode::FinalTest), url: DEFAULT_URL.to_string() })
+        );
     }
 }

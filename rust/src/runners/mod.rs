@@ -3,6 +3,7 @@
 pub mod checkpoint;
 pub mod course;
 pub mod exercise;
+pub mod final_test_runner;
 pub mod iframe;
 pub mod reading;
 pub mod unit;
