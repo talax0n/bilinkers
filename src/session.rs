@@ -161,9 +161,10 @@ pub fn ensure_browser(env: &HashMap<String, String>, port: u16, url: &str) -> Re
         return Ok(Launch::Reused);
     }
     let binary = resolve_binary_path(env)?;
+    let profile = crate::install::bin_dir().and_then(|bin| bin.parent().map(|dir| dir.join("chrome-profile")));
     let mut command = Command::new(&binary);
     command
-        .args([format!("--remote-debugging-port={port}"), url.to_string()])
+        .args(launch_args(&binary, profile.as_deref(), port, url))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -171,6 +172,18 @@ pub fn ensure_browser(env: &HashMap<String, String>, port: u16, url: &str) -> Re
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
     command.spawn().map_err(|e| format!("Failed to launch browser at \"{binary}\": {e}"))?;
     Ok(Launch::Launched { binary })
+}
+
+/// Google Chrome 136+ ignores the debug port on its default profile, so it gets the app's own
+/// profile (the LMS sign-in is asked once there, then kept). Other browsers keep the user's.
+pub fn launch_args(binary: &str, profile: Option<&Path>, port: u16, url: &str) -> Vec<String> {
+    let mut args = vec![format!("--remote-debugging-port={port}")];
+    let lower = binary.to_lowercase();
+    if let Some(dir) = profile.filter(|_| lower.contains("google") && lower.contains("chrome")) {
+        args.push(format!("--user-data-dir={}", dir.display()));
+    }
+    args.push(url.to_string());
+    args
 }
 
 /// True when something answers `/json/version` on the debug port.
@@ -436,6 +449,29 @@ impl RunHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn google_chrome_gets_its_own_profile_so_the_debug_port_opens() {
+        let profile = Path::new("/data/Bilinkers/chrome-profile");
+        let url = "https://lms.example";
+        let own = |binary| launch_args(binary, Some(profile), 9222, url);
+        let with_profile = vec![
+            "--remote-debugging-port=9222".to_string(),
+            "--user-data-dir=/data/Bilinkers/chrome-profile".to_string(),
+            url.to_string(),
+        ];
+        let without = vec!["--remote-debugging-port=9222".to_string(), url.to_string()];
+        assert_eq!(own(r"C:\Program Files\Google\Chrome\Application\chrome.exe"), with_profile);
+        assert_eq!(own("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"), with_profile);
+        assert_eq!(own("/usr/bin/google-chrome-stable"), with_profile);
+        assert_eq!(
+            own("/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"),
+            without,
+            "brave keeps its profile"
+        );
+        assert_eq!(own(r"C:\Program Files\Chromium\Application\chrome.exe"), without, "chromium allows the default");
+        assert_eq!(launch_args("/usr/bin/google-chrome", None, 9222, url), without, "no app folder known");
+    }
 
     #[test]
     fn run_mode_names_parse_back_to_the_same_mode() {
