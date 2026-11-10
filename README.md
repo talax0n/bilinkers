@@ -1,54 +1,113 @@
-# Beelingua Bot
+<h1 align="center">Bilinkers</h1>
 
-Completes Beelingua English-course activities on `lms.binus.ac.id`. It drives your own logged-in browser over the Chrome DevTools Protocol (CDP), answers each question, checks the result on the page, and moves on. A desktop window built with [Rune](https://github.com/anomalyco/rune) shows the run live.
+## Requirements
 
-## How each page gets completed
+| Tool | Why |
+|---|---|
+| Rust, from [rustup](https://rustup.rs) | Builds Bilinkers. `rust-toolchain.toml` selects Rust 1.99.1, which Rune needs. |
+| Chrome, Brave, or Edge | The browser that Bilinkers drives. |
+| [Codex CLI](https://github.com/openai/codex), signed in with `codex login` | Answers the questions that need an LLM. It uses your ChatGPT sign-in, so no API key is stored. Only `iframe` fill-in-blank questions and `final-test` need it. |
+
+## Quick start
+
+1. Copy the example config:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+   The defaults work with Chrome. For Brave, set `BROWSER=brave`.
+
+2. Start Bilinkers:
+
+   ```bash
+   cargo run --release
+   ```
+
+3. In the browser window that opens, log in to the LMS and go to the course page.
+4. In the Bilinkers window, pick a mode and start the run.
+
+## Modes
+
+Pass a mode to skip the picker, for example `cargo run --release -- course`. Without one, Bilinkers detects the page type itself.
 
 | Mode | What it does | Uses the LLM |
 |---|---|---|
-| `course` | Reads the roadmap's "Unit 4/8 · CP 1/3" counters and runs the next unfinished Unit or Checkpoint node until none is left. Never opens the Final Test. | no |
-| `unit` | Walks the activity rows top to bottom, skips checkmarked ones, plays video rows, and runs each activity with the matching mode. | no |
-| `exercise` | Native exercises (reading comprehension, listening): tries A, B, C… until Check says correct, then Submit. | no |
-| `iframe` | LTI activities. Fill-in-blank asks the LLM. Error analysis tries every letter combination. Matching reads the answer off the page. Vocabulary slides are clicked through. | fill-in-blank only |
-| `reading` | Grouped reading passage: cycles A to F per question until the option locks, then Submit. | no |
-| `checkpoint` | Answers every question with one letter per attempt, submits, and starts a new attempt until the score is 100. | no |
-| `final-test` | Writes an LLM answer key to `final-test-answers.md`. Read-only unless you opt in. **Never clicks Submit.** | yes |
+| `course` | Reads the roadmap counters ("Unit 4/8 · CP 1/3") and runs the next unfinished Unit or Checkpoint until none is left. Never opens the Final Test. | No |
+| `unit` | Walks the activity rows top to bottom. Skips rows that already have a checkmark, plays video rows, and runs each activity with the matching mode. | No |
+| `exercise` | Native exercises, such as reading comprehension and listening. Tries A, B, C, and so on until Check says correct, then clicks Submit. | No |
+| `iframe` | LTI activities. Fill-in-blank asks the LLM. Error analysis tries every letter combination. Matching reads the answer off the page. Vocabulary slides are clicked through. | Fill-in-blank only |
+| `reading` | Grouped reading passages. Cycles A to F on each question until the option locks, then clicks Submit. | No |
+| `checkpoint` | Answers every question with one letter per attempt, submits, and starts a new attempt until the score is 100. | No |
+| `final-test` | Writes an LLM answer key to `final-test-answers.md`. Read-only unless you opt in. **Never clicks Submit.** | Yes |
 
-Without a mode, the bot detects the page type itself. How each page works, with selectors and timing quirks, is in [`docs/platform-notes.md`](docs/platform-notes.md).
+[`docs/platform-notes.md`](docs/platform-notes.md) describes how each page type works, with selectors and timing quirks.
 
-## Setup
+## The Final Test
 
-1. Install Rust with [rustup](https://rustup.rs). `rust-toolchain.toml` selects Rust 1.99.1, which Rune needs.
-2. Install the [Codex CLI](https://github.com/openai/codex) and run `codex login`. The bot sends questions through `codex exec`, so it uses your ChatGPT sign-in and stores no API key.
-3. Have Chrome, Brave, or Edge installed.
-4. Copy `.env.example` to `.env`. The defaults work with Chrome. For Brave, set `BROWSER=brave`.
+A Final Test allows exactly one attempt, so `final-test` is careful by default:
 
-| Variable | Meaning |
-|---|---|
-| `BROWSER` | `chrome` (default), `brave`, or `edge` |
-| `BROWSER_BINARY_PATH` | The browser's executable, when it is not in the default location |
-| `CODEX_MODEL` | Model for `codex exec`. Empty uses the Codex CLI default. |
-| `CDP_PORT` | Debug port, default `9222` |
-| `MAX_ANSWER_RETRIES` | Retries per LLM-answered question, default 25 |
-| `FINAL_TEST_*` | Final-test opt-ins, documented in `.env.example` |
+- It only reads the questions and writes the answer key to `final-test-answers.md`. It also writes `final-test-answers.json` for later passes.
+- Each later run re-derives every answer independently. Answers that agree across passes get higher confidence.
+- It clicks answers only when you set `FINAL_TEST_AUTO_ANSWER=1`. Then it clicks only the answers whose confidence reaches `FINAL_TEST_CONFIDENCE_THRESHOLD`.
+- `FINAL_TEST_GUESS_LISTENING=1` clicks a random letter on each listening question instead of leaving it blank.
+- It never clicks Submit. You review the answers and submit yourself.
 
-## Run
+`.env.example` documents every `FINAL_TEST_*` option.
+
+## Configuration
+
+Set these in `.env`.
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `BROWSER` | `chrome`, `brave`, or `edge` | `chrome` |
+| `BROWSER_BINARY_PATH` | Path to the browser executable, when it is not in the default location | Empty |
+| `CDP_PORT` | Remote debugging port | `9222` |
+| `CODEX_MODEL` | Model for `codex exec` | Empty, which uses the Codex CLI default |
+| `MAX_ANSWER_RETRIES` | Retries for each LLM-answered question | `25` |
+| `FINAL_TEST_*` | Final Test opt-ins | All off |
+
+## Command reference
 
 ```bash
-cargo run --release -- course
+cargo run --release -- [--no-ui] [mode] [url]
 ```
 
-The bot starts your browser with remote debugging on (or reuses one already running with it), waits for you to log in and open the page, then runs when you press Enter. Replace `course` with any mode from the table, or leave it out to auto-detect.
+| Command | What it does |
+|---|---|
+| `[mode] [url]` | Runs a mode. `url` defaults to `https://lms.binus.ac.id`. |
+| `--no-ui` | Skips the window. You confirm in the terminal and get JSON log lines. `NO_TUI=1` does the same. |
+| `attach` | Checks that Bilinkers can see your LMS tab. Changes nothing. |
+| `open-row "<row title>"` | Opens one activity row by its title. |
+| `eval-frame "<script>"` | Runs JavaScript in the activity frame and prints the result. Useful for debugging selectors. |
+| `ui-demo --snap out.png` | Renders the window from sample events into an image, without a browser. |
 
-- `--no-ui` (or `NO_TUI=1`) prints JSON log lines instead of opening the window.
-- `cargo run --release -- attach` checks that the bot can see your LMS tab, without changing anything.
+## Project layout
+
+| Path | Contents |
+|---|---|
+| `src/bin/` | The command-line entry point and argument parsing |
+| `src/session.rs` | Run modes, browser launch, and the run thread that the terminal and the window share |
+| `src/browser.rs`, `src/frame.rs` | The CDP connection to the LMS tab and script evaluation inside the activity iframe |
+| `src/detect.rs` | Detects which mode fits the open page |
+| `src/runners/` | One runner per mode |
+| `src/question_types/` | Detects, parses, and answers each question type |
+| `src/strategy.rs`, `src/answer_loop.rs` | Answering strategies without the LLM, and the retry loop around each answer |
+| `src/llm.rs` | Prompts, response parsing, and the Codex CLI client |
+| `src/final_test.rs` | The Final Test answer key and the merge of multiple passes |
+| `src/ui/` | The desktop window, behind the `ui` feature |
+| `docs/platform-notes.md` | What Bilinkers knows about the LMS pages |
 
 ## Development
 
 ```bash
 cargo test
 cargo clippy --all-targets -- -D warnings
-cargo run -- ui-demo --snap out.png   # render the window headlessly from sample events
 ```
 
-`cargo build --no-default-features` builds without the window (the `ui` feature).
+To build without the desktop window, turn off the default `ui` feature:
+
+```bash
+cargo build --no-default-features
+```
