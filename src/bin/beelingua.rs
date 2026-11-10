@@ -9,12 +9,13 @@ use beelingua::browser::{attach_to_lms, Driver, FramedPage, Lms};
 use beelingua::config::{build_config, environment};
 use beelingua::detect::detect_mode;
 use beelingua::runners::unit::UnitPage;
-use beelingua::session::{ensure_browser, run_and_report, wait_for_port, Launch, RunMode, DETECT_FAILED, STOPPED};
+use beelingua::session::{ensure_browser, run_and_report, wait_for_port, Launch, RunMode, DETECT_FAILED};
 
 const USAGE: &str = "usage: beelingua [--no-ui] [course|unit|exercise|iframe|reading|checkpoint|final-test] [url]
        beelingua attach | open-row \"<row title>\" | eval-frame \"<script>\" | ui-demo <rune flags>
 Env: CDP_PORT (default 9222), BROWSER (chrome|brave|edge), BROWSER_BINARY_PATH, LLM_PROVIDER=codex
-A run opens a dashboard window on a terminal with a display; --no-ui or NO_TUI=1 prints JSON lines.
+On a terminal with a display a run opens a window to pick the mode and start; --no-ui or NO_TUI=1
+keeps the terminal prompts and prints JSON lines.
 final-test is read-only unless FINAL_TEST_AUTO_ANSWER=1 or FINAL_TEST_GUESS_LISTENING=1
 (FINAL_TEST_CONFIDENCE_THRESHOLD, FINAL_TEST_REVIEWS_REQUIRED). It never clicks Submit.";
 
@@ -167,6 +168,97 @@ async fn prepare(mode: Mode, env: &HashMap<String, String>, port: u16) -> Option
     Some((lms, run))
 }
 
+#[cfg(feature = "ui")]
+mod window {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use beelingua::config::Config;
+    use beelingua::session::{ensure_browser, BrowserSetup, Connection, RunHandle, RunMode, STOPPED};
+    use beelingua::ui::{Host, StartInfo};
+
+    /// The window's way to the browser and the bot: probes, launches and runs on other threads.
+    struct LiveHost {
+        runtime: tokio::runtime::Handle,
+        port: u16,
+        url: String,
+        env: HashMap<String, String>,
+        config: Config,
+        run: Mutex<Runs>,
+    }
+
+    #[derive(Default)]
+    struct Runs {
+        current: Option<RunHandle>,
+        last_code: i32,
+    }
+
+    impl Runs {
+        fn reap(&mut self) {
+            if let Some(run) = self.current.take() {
+                self.last_code = run.join();
+            }
+        }
+    }
+
+    impl Host for LiveHost {
+        fn probe(&self) -> Connection {
+            Connection::probe(self.port)
+        }
+
+        fn open_browser(&self) -> Result<(), String> {
+            ensure_browser(&self.env, self.port, &self.url).map(|_| ())
+        }
+
+        fn start(&self, mode: Option<RunMode>) {
+            let mut runs = self.run.lock().unwrap_or_else(|e| e.into_inner());
+            runs.reap();
+            let (config, env) = (self.config.clone(), self.env.clone());
+            runs.current = Some(RunHandle::spawn(self.runtime.clone(), self.port, mode, config, env));
+        }
+
+        fn stop(&self) {
+            if let Some(run) = self.run.lock().unwrap_or_else(|e| e.into_inner()).current.as_mut() {
+                run.stop();
+            }
+        }
+    }
+
+    /// Runs the window until it closes; the last run's exit code, or why no window opened.
+    pub fn run(
+        runtime: &tokio::runtime::Runtime,
+        preselect: Option<RunMode>,
+        url: &str,
+        env: HashMap<String, String>,
+        config: Config,
+        port: u16,
+    ) -> Result<i32, String> {
+        let info = StartInfo {
+            preselect,
+            browser: BrowserSetup::from_env(&env),
+            auto_answer: env.get("FINAL_TEST_AUTO_ANSWER").is_some_and(|v| v == "1"),
+        };
+        let host = Arc::new(LiveHost {
+            runtime: runtime.handle().clone(),
+            port,
+            url: url.to_string(),
+            env,
+            config,
+            run: Mutex::new(Runs::default()),
+        });
+        beelingua::ui::run(info, host.clone())?;
+        let mut runs = host.run.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(run) = runs.current.as_mut().filter(|run| !run.is_finished()) {
+            eprintln!("Window closed; stopping the run.");
+            run.stop();
+            runs.reap();
+            return Ok(STOPPED);
+        }
+        runs.reap();
+        Ok(runs.last_code)
+    }
+}
+
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let no_ui = take_flag(&mut args, "--no-ui");
@@ -176,7 +268,7 @@ fn main() {
     });
     #[cfg(feature = "ui")]
     if let Mode::UiDemo { rune_args } = mode {
-        beelingua::ui::render_headless("course", &beelingua::ui::demo_events(), rune_args);
+        beelingua::ui::render_headless(rune_args);
         return;
     }
     #[cfg(not(feature = "ui"))]
@@ -188,34 +280,20 @@ fn main() {
     let port = env.get("CDP_PORT").and_then(|p| p.parse().ok()).unwrap_or(9222);
 
     let runtime = tokio::runtime::Runtime::new().unwrap_or_else(|e| fail(&format!("Could not start tokio: {e}")));
+    let ui = wants_ui(no_ui, &env, std::io::stdout().is_terminal(), display_available());
+    #[cfg(feature = "ui")]
+    if let (true, Mode::Run { mode: preselect, url }) = (ui, &mode) {
+        match window::run(&runtime, *preselect, url, env.clone(), config.clone(), port) {
+            Ok(code) => std::process::exit(code),
+            Err(e) => eprintln!("No window ({e}); using the terminal instead."),
+        }
+    }
+    #[cfg(not(feature = "ui"))]
+    let _ = ui;
     let Some((lms, run)) = runtime.block_on(prepare(mode, &env, port)) else {
         return;
     };
-    let ui = wants_ui(no_ui, &env, std::io::stdout().is_terminal(), display_available());
-
-    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    // The window owns the main thread (macOS requires it), so the bot runs its runtime beside it.
-    let bot = std::thread::spawn(move || {
-        runtime.block_on(async move {
-            tokio::select! {
-                code = run_and_report(run, &lms, &config, &env) => code,
-                Ok(()) = stopped => STOPPED,
-            }
-        })
-    });
-
-    #[cfg(feature = "ui")]
-    if ui {
-        if let Err(e) = beelingua::ui::run(run.name()) {
-            eprintln!("No dashboard window ({e}); printing JSON lines instead.");
-        } else if !bot.is_finished() {
-            eprintln!("Dashboard closed; stopping the run.");
-        }
-        let _ = stop.send(());
-    }
-    #[cfg(not(feature = "ui"))]
-    let _ = (ui, &stop);
-    let code = bot.join().unwrap_or(1);
+    let code = runtime.block_on(run_and_report(run, &lms, &config, &env));
     std::process::exit(code);
 }
 

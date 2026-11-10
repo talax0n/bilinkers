@@ -1,16 +1,15 @@
-//! Desktop dashboard for a run, the Rune port of `src/dashboard.js`: the mode and run status,
-//! the correct and incorrect tallies, the current question and a scrolling log.
-//! Logger events reach the window through a channel sink, so the bot never waits on it.
+//! The run dashboard, the Rune port of `src/dashboard.js`: the mode and run status, the
+//! correct and incorrect tallies, the current question and a scrolling log, all built from
+//! logger events.
 
 use std::collections::VecDeque;
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
 
-use rune::tok::{self, type_, Family, TextStyle};
-use rune::{col, el, oklch, row, text, App, AppHandle, AppSpec, Chrome, Color, Cx, El, ScrollSpec, Tx};
+use rune::tok::{self, type_};
+use rune::{col, el, row, text, Color, El, ScrollSpec};
 use serde_json::{json, Value};
 
-use crate::logger::{self, Event, Level, Sink};
+use crate::logger::{Event, Level};
+use crate::ui::style::{card, dot, section, Tones, FIGURE, HEADING, MONO, MONO_LEVEL, SUBHEADING};
 
 /// A logger call to replay: level, message and fields.
 pub type DemoEvent = (Level, &'static str, Vec<(&'static str, Value)>);
@@ -24,6 +23,8 @@ pub enum RunStatus {
     /// The `status` field of "Run finished": complete, stuck, unhandled, passed and so on.
     Finished(String),
     Failed,
+    /// Stop was pressed, or the window closed, before the run ended.
+    Stopped,
 }
 
 impl RunStatus {
@@ -32,6 +33,7 @@ impl RunStatus {
             RunStatus::Running => "running",
             RunStatus::Finished(status) => status,
             RunStatus::Failed => "error",
+            RunStatus::Stopped => "stopped",
         }
     }
 }
@@ -94,6 +96,12 @@ impl Dashboard {
         match event.message.as_str() {
             "Run finished" => self.status = RunStatus::Finished(status.unwrap_or("complete").to_string()),
             "Run failed" => self.status = RunStatus::Failed,
+            "Run stopped" => self.status = RunStatus::Stopped,
+            "Detected" => {
+                if let Some(mode) = field("mode").and_then(Value::as_str) {
+                    self.mode = mode.to_string();
+                }
+            }
             _ => {}
         }
 
@@ -111,113 +119,44 @@ impl Dashboard {
     }
 }
 
-/// The logger sink: queues a copy of each event and wakes the window, without blocking.
-struct ChannelSink {
-    events: Sender<Event>,
-    window: AppHandle<State>,
-}
-
-impl Sink for ChannelSink {
-    fn emit(&self, event: &Event) {
-        if self.events.send(event.clone()).is_ok() {
-            self.window.wake();
-        }
-    }
-}
-
-struct State {
-    board: Dashboard,
-    events: Arc<Mutex<Receiver<Event>>>,
-}
-
-fn poll(s: &mut State, _: f64, _: &mut Tx) -> bool {
-    let events = s.events.lock().unwrap_or_else(|e| e.into_inner());
-    let mut changed = false;
-    while let Ok(event) = events.try_recv() {
-        s.board.apply(&event);
-        changed = true;
-    }
-    changed
-}
-
-/// The colours the theme tokens don't have, tuned per appearance for contrast on `bg` and `card`.
-struct Tones {
-    good: Color,
-    warn: Color,
-    bad: Color,
-    accent: Color,
-}
-
-fn tones(dark: bool) -> Tones {
-    if dark {
-        Tones {
-            good: oklch(0.78, 0.13, 150.0),
-            warn: oklch(0.82, 0.12, 80.0),
-            bad: oklch(0.72, 0.16, 25.0),
-            accent: tok::accent(0, true),
-        }
-    } else {
-        Tones {
-            good: oklch(0.5, 0.13, 150.0),
-            warn: oklch(0.55, 0.12, 65.0),
-            bad: oklch(0.52, 0.18, 27.0),
-            accent: oklch(0.5, 0.15, 256.0),
-        }
-    }
-}
-
-const MONO: TextStyle = TextStyle::new(12.0, 400.0).family(Family::SystemMono).lh(17.0);
-const MONO_LEVEL: TextStyle = TextStyle::new(12.0, 600.0).family(Family::SystemMono).lh(17.0);
-const FIGURE: TextStyle = TextStyle::new(22.0, 600.0).features("'tnum' 1");
-
 fn status_color(status: &RunStatus, tones: &Tones) -> Color {
     match status {
         RunStatus::Running => tones.accent,
         RunStatus::Finished(s) if s == "complete" || s == "passed" => tones.good,
-        RunStatus::Finished(_) => tones.warn,
+        RunStatus::Finished(_) | RunStatus::Stopped => tones.warn,
         RunStatus::Failed => tones.bad,
     }
 }
 
 fn stat(key: &str, label: &str, value: El, t: &tok::Theme) -> El {
-    col()
-        .key(key)
-        .grow(1.0)
-        .gap(2.0)
-        .padding(12.0)
-        .radius(8.0)
-        .fill(t.card)
-        .border(1.0, t.card_border)
-        .child(text(label.to_string()).font(type_::LABEL).color(t.text_secondary))
-        .child(value)
+    card(key, t).grow(1.0).gap(2.0).child(section(label, t)).child(value)
 }
 
 fn figure(key: &str, value: String, color: Color) -> El {
     text(value).key(format!("{key}-value")).font(FIGURE).color(color)
 }
 
-fn view(s: &State, cx: &mut Cx<State>) -> El {
-    let dark = cx.system_dark();
-    let t = tok::theme(dark);
-    let tones = tones(dark);
-    let board = &s.board;
-
-    let status_color = status_color(&board.status, &tones);
+/// The run's mode and status, its tallies and its log, with `action` (Stop or New run) at the
+/// header's end.
+pub fn view(board: &Dashboard, action: El, t: &tok::Theme, tones: &Tones) -> El {
+    let status_color = status_color(&board.status, tones);
     let status = row()
         .key("status")
         .gap(6.0)
         .center_y()
-        .child(el().size(8.0, 8.0).radius(4.0).fill(status_color))
+        .child(dot(status_color))
         .child(text(board.status.label().to_string()).key("status-label").font(type_::LABEL).color(status_color));
     let header = row()
         .key("header")
         .w_full()
         .center_y()
         .gap(8.0)
-        .child(text("Beelingua Bot").font(TextStyle::new(15.0, 600.0)).color(t.text))
-        .child(text(board.mode.clone()).key("mode").font(TextStyle::new(15.0, 400.0)).color(t.text_secondary))
+        .child(text("Beelingua Bot").font(HEADING).color(t.text))
+        .child(text(board.mode.clone()).key("mode").font(SUBHEADING).color(t.text_secondary))
         .child(el().grow(1.0))
-        .child(status);
+        .child(status)
+        .child(el().w(4.0))
+        .child(action);
 
     let number = board.question.map_or("none yet".to_string(), |n| format!("#{n}"));
     let mut question = row().gap(10.0).center_y().child(figure("question", number, t.text));
@@ -227,9 +166,9 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     let stats = row()
         .w_full()
         .gap(10.0)
-        .child(stat("correct", "Correct", figure("correct", board.correct.to_string(), tones.good), &t))
-        .child(stat("incorrect", "Incorrect", figure("incorrect", board.incorrect.to_string(), tones.bad), &t))
-        .child(stat("question", "Question", question, &t).grow(2.0));
+        .child(stat("correct", "Correct", figure("correct", board.correct.to_string(), tones.good), t))
+        .child(stat("incorrect", "Incorrect", figure("incorrect", board.incorrect.to_string(), tones.bad), t))
+        .child(stat("question", "Question", question, t).grow(2.0));
 
     let mut lines = col().w_full().py(6.0);
     for line in &board.lines {
@@ -265,67 +204,10 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
         .scroll(ScrollSpec { stick_bottom: true })
         .child(lines);
 
-    col().w_full().h_full().padding(16.0).gap(12.0).fill(t.bg).child(header).child(stats).child(log)
+    col().key("dashboard").w_full().h_full().gap(12.0).child(header).child(stats).child(log)
 }
 
-fn app(mode: &str, events: Arc<Mutex<Receiver<Event>>>) -> App<State> {
-    let spec = AppSpec {
-        poll: Some(poll),
-        min_size: Some((520.0, 360.0)),
-        ..AppSpec::new("Beelingua Bot", (820.0, 560.0), placeholder, view)
-    };
-    let board = Dashboard::new(mode);
-    // Rune reads its own flags from argv by default; the bot's arguments are not for it.
-    App::new(spec)
-        // A standard title bar, so the header never sits under the traffic lights.
-        .chrome(Chrome { full_size_content: false, ..Chrome::DEFAULT })
-        .init(move || State { board, events })
-        .args(Vec::<String>::new())
-}
-
-fn placeholder() -> State {
-    State { board: Dashboard::new(""), events: Arc::new(Mutex::new(mpsc::channel().1)) }
-}
-
-/// Routes logger events to a new window and runs it on this thread until it closes.
-/// Without a display it puts the stdout sink back, prints what it queued, and returns the error.
-pub fn run(mode: &str) -> Result<(), String> {
-    let (sender, receiver) = mpsc::channel();
-    let receiver = Arc::new(Mutex::new(receiver));
-    let app = app(mode, receiver.clone());
-    logger::set_sink(Some(Box::new(ChannelSink { events: sender, window: app.handle() })));
-    let result = app.try_run();
-    logger::set_sink(None);
-    if result.is_err() {
-        for event in receiver.lock().unwrap_or_else(|e| e.into_inner()).try_iter() {
-            println!("{}", event.to_json_line());
-        }
-    }
-    result
-}
-
-/// Whether a window can open here: always on macOS and Windows, else when X11 or Wayland is set.
-pub fn display_available() -> bool {
-    if cfg!(any(target_os = "macos", target_os = "windows")) {
-        return true;
-    }
-    ["DISPLAY", "WAYLAND_DISPLAY"].iter().any(|name| std::env::var_os(name).is_some_and(|v| !v.is_empty()))
-}
-
-/// Dev: logs `events` through the real sink, then renders the window headless with Rune's
-/// tooling flags (`--snap out.png`, `--tree tree.json`, `--theme light`, ...).
-pub fn render_headless(mode: &str, events: &[DemoEvent], rune_args: Vec<String>) {
-    let (sender, receiver) = mpsc::channel();
-    let app = app(mode, Arc::new(Mutex::new(receiver))).args(rune_args);
-    logger::set_sink(Some(Box::new(ChannelSink { events: sender, window: app.handle() })));
-    for (level, message, fields) in events {
-        logger::log(*level, message, fields.iter().cloned());
-    }
-    logger::set_sink(None);
-    app.run();
-}
-
-/// A fixed run for `render_headless`: three correct answers, one incorrect, a few info and
+/// A fixed run for headless renders: three correct answers, one incorrect, a few info and
 /// warn lines, then a finished course.
 pub fn demo_events() -> Vec<DemoEvent> {
     let question = |n: u32, kind: &str, status: &str, attempts: u32| {
@@ -399,6 +281,10 @@ mod tests {
         let failed = board_after(&[(Level::Error, "Run failed", vec![("error", json!("boom"))])]);
         assert_eq!(failed.status.label(), "error");
         assert_eq!(Dashboard::new("unit").status.label(), "running");
+        let stopped = board_after(&[(Level::Warn, "Run stopped", vec![])]);
+        assert_eq!(stopped.status, RunStatus::Stopped);
+        let detected = board_after(&[(Level::Info, "Detected", vec![("mode", json!("reading"))])]);
+        assert_eq!(detected.mode, "reading");
     }
 
     #[test]
@@ -410,49 +296,5 @@ mod tests {
         assert_eq!(board.lines.len(), MAX_LOG_LINES);
         assert_eq!(board.lines.front().map(|l| l.message.as_str()), Some("line 5"));
         assert_eq!(board.lines.back().map(|l| l.id), Some(MAX_LOG_LINES as u64 + 4));
-    }
-
-    #[test]
-    fn the_view_drains_the_channel_and_shows_the_tally_and_header() {
-        let (sender, receiver) = mpsc::channel();
-        for (level, message, fields) in demo_events() {
-            sender.send(event(level, message, fields)).unwrap();
-        }
-        let state = State { board: Dashboard::new("course"), events: Arc::new(Mutex::new(receiver)) };
-        let env = rune::Env { system_dark: true, scale: 2.0 };
-        let mut rt = rune::Runtime::new(state, view, (820.0, 560.0), env);
-        rt.poll = Some(poll);
-        rt.frame(0.0);
-        rt.frame(1.0 / 60.0);
-        let shown = |key: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).and_then(|e| e.text);
-        assert_eq!(shown("correct-value").as_deref(), Some("3"));
-        assert_eq!(shown("incorrect-value").as_deref(), Some("1"));
-        assert_eq!(shown("question-value").as_deref(), Some("#4"));
-        assert_eq!(shown("question-type").as_deref(), Some("multiple-choice"));
-        assert_eq!(shown("mode").as_deref(), Some("course"));
-        assert_eq!(shown("status-label").as_deref(), Some("complete"));
-        assert!(rt.find("line-9").is_some(), "the newest log line is laid out");
-    }
-
-    #[test]
-    fn a_full_log_drops_old_rows_and_keeps_the_newest_in_view() {
-        let (sender, receiver) = mpsc::channel();
-        for i in 0..MAX_LOG_LINES + 50 {
-            sender.send(event(Level::Info, &format!("line {i}"), vec![("questionNum", json!(i))])).unwrap();
-        }
-        let state = State { board: Dashboard::new("unit"), events: Arc::new(Mutex::new(receiver)) };
-        let mut rt = rune::Runtime::new(state, view, (820.0, 560.0), rune::Env { system_dark: false, scale: 2.0 });
-        rt.poll = Some(poll);
-        for _ in 0..30 {
-            rt.frame(1.0 / 60.0);
-        }
-        let elements = rt.elements();
-        let rect = |key: &str| elements.iter().find(|e| e.key.as_deref() == Some(key)).map(|e| e.rect);
-        assert!(rect("line-49").is_none(), "the oldest rows are gone");
-        let (log, newest) = (rect("log").unwrap(), rect(&format!("line-{}", MAX_LOG_LINES + 49)).unwrap());
-        assert!(
-            newest[1] >= log[1] && newest[1] + newest[3] <= log[1] + log[3] + 0.5,
-            "{newest:?} sits inside {log:?}"
-        );
     }
 }
