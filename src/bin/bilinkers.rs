@@ -286,7 +286,8 @@ mod window {
         }
 
         fn probe(&self) -> Connection {
-            Connection::probe(self.port)
+            let mut watcher = self.watcher.lock().unwrap_or_else(|e| e.into_inner());
+            self.runtime.block_on(watcher.connection(self.port))
         }
 
         fn open_browser(&self) -> Result<(), String> {

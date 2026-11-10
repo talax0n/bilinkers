@@ -3,8 +3,6 @@
 //! reports only through the logger.
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread::JoinHandle;
@@ -13,7 +11,8 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
 
-use crate::browser::{attach_to_lms, Driver, Lms, LMS_HOST};
+use crate::browser::{attach_to_lms, open_lms, Driver, Lms};
+use crate::devtools::{http_get, page_tabs, ListedTab};
 use crate::config::Config;
 use crate::detect::{classify_page, detect_mode, PageKind, PageMode};
 use crate::logger;
@@ -174,49 +173,6 @@ pub fn ensure_browser(env: &HashMap<String, String>, port: u16, url: &str) -> Re
     Ok(Launch::Launched { binary })
 }
 
-/// One GET on the debug port: the status line's code and the body, None when nothing answers.
-fn http_get(port: u16, path: &str) -> Option<(u16, Vec<u8>)> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(500)).ok()?;
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n");
-    stream.write_all(request.as_bytes()).ok()?;
-    let mut data = Vec::new();
-    let mut chunk = [0u8; 8192];
-    loop {
-        let n = stream.read(&mut chunk).unwrap_or(0);
-        if n == 0 {
-            break;
-        }
-        data.extend_from_slice(&chunk[..n]);
-        // The DevTools server may keep the connection open, so stop once Content-Length is in.
-        if let Some((head, body)) = split_response(&data) {
-            if content_length(head).is_some_and(|len| body.len() >= len) {
-                break;
-            }
-        }
-    }
-    let (head, body) = split_response(&data)?;
-    let status = std::str::from_utf8(head).ok()?.split_whitespace().nth(1)?.parse().ok()?;
-    let body = match content_length(head) {
-        Some(len) => body[..len.min(body.len())].to_vec(),
-        None => body.to_vec(),
-    };
-    Some((status, body))
-}
-
-fn split_response(data: &[u8]) -> Option<(&[u8], &[u8])> {
-    let end = data.windows(4).position(|w| w == b"\r\n\r\n")?;
-    Some((&data[..end], &data[end + 4..]))
-}
-
-fn content_length(head: &[u8]) -> Option<usize> {
-    std::str::from_utf8(head).ok()?.lines().find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        name.trim().eq_ignore_ascii_case("content-length").then(|| value.trim().parse().ok())?
-    })
-}
-
 /// True when something answers `/json/version` on the debug port.
 pub fn cdp_answers(port: u16) -> bool {
     http_get(port, "/json/version").is_some_and(|(status, _)| status == 200)
@@ -248,21 +204,22 @@ pub enum Connection {
 }
 
 impl Connection {
-    /// Reads the port's tab list (`/json/list`, which only lists), like attach_to_lms picks a tab.
+    /// The LMS tab when exactly one is open, from the tab list alone (`/json/list` only lists).
+    /// With several, `Watcher::connection` asks the tabs which one is visible.
     pub fn probe(port: u16) -> Connection {
-        match http_get(port, "/json/list") {
+        match page_tabs(port) {
             None => Connection::NotRunning,
-            Some((_, body)) => Connection::from_targets(&serde_json::from_slice(&body).unwrap_or(Value::Null)),
+            Some(tabs) => Connection::from_tabs(&tabs),
         }
     }
 
-    pub fn from_targets(targets: &Value) -> Connection {
-        let pages = targets.as_array().into_iter().flatten().filter(|t| t["type"] == "page");
-        let text = |t: &Value, key: &str| t[key].as_str().unwrap_or_default().to_string();
-        pages
-            .map(|t| (text(t, "title"), text(t, "url")))
-            .find(|(_, url)| url.contains(LMS_HOST))
-            .map_or(Connection::NoLmsTab, |(title, url)| Connection::Lms { title, url })
+    /// The first listed LMS tab, else NoLmsTab.
+    pub fn from_tabs(tabs: &[ListedTab]) -> Connection {
+        tabs.iter().find(|t| t.is_lms()).map_or(Connection::NoLmsTab, Connection::of)
+    }
+
+    fn of(tab: &ListedTab) -> Connection {
+        Connection::Lms { title: tab.title.clone(), url: tab.url.clone() }
     }
 
     pub fn has_lms_tab(&self) -> bool {
@@ -285,7 +242,7 @@ pub enum Sighting {
 }
 
 /// Watches the LMS tab over one CDP session, reattaching only when that session stops
-/// answering. Every look is read-only.
+/// answering. Every look is read-only and never brings a tab to front.
 #[derive(Default)]
 pub struct Watcher {
     lms: Option<Lms>,
@@ -294,36 +251,68 @@ pub struct Watcher {
 const LOOK_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl Watcher {
-    /// Lists the tabs (blocking, so run it off the runtime's workers) and, when `classify` and
-    /// an LMS tab is open, reads what it shows. A page that can start a run drops the session,
-    /// since the run attaches its own.
-    pub async fn look(&mut self, port: u16, classify: bool) -> Sighting {
-        let (title, url) = match Connection::probe(port) {
-            Connection::Lms { title, url } => (title, url),
-            other => {
-                self.lms = None;
-                return if other == Connection::NoLmsTab { Sighting::NoLmsTab } else { Sighting::NotRunning };
-            }
+    /// The LMS tab a run would pick. With one LMS tab the tab list says it; with several, the
+    /// tabs are asked over this watcher's session, opened once and reused.
+    pub async fn connection(&mut self, port: u16) -> Connection {
+        let Some(tabs) = page_tabs(port) else {
+            self.lms = None;
+            return Connection::NotRunning;
         };
-        if !classify {
-            return Sighting::Lms { title, url, page: None };
+        if tabs.iter().filter(|t| t.is_lms()).count() < 2 {
+            return Connection::from_tabs(&tabs);
         }
-        let page = tokio::time::timeout(LOOK_TIMEOUT, self.classify(port)).await.ok().flatten();
+        match tokio::time::timeout(LOOK_TIMEOUT, self.pick(port, &tabs)).await.ok().flatten() {
+            Some(tab) => Connection::of(&tab),
+            None => Connection::from_tabs(&tabs),
+        }
+    }
+
+    /// Picks over the session, opening one when there is none or it stopped answering.
+    async fn pick(&mut self, port: u16, tabs: &[ListedTab]) -> Option<ListedTab> {
+        if let Some(lms) = self.lms.as_mut() {
+            if lms.repick(tabs).await.is_ok_and(|why| why.is_some()) {
+                return Some(lms.tab.clone());
+            }
+        }
+        self.lms = None;
+        let lms = open_lms(port).await.ok()?;
+        let tab = lms.tab.clone();
+        self.lms = Some(lms);
+        Some(tab)
+    }
+
+    /// Lists the tabs (blocking, so run it off the runtime's workers) and, when `classify` and
+    /// an LMS tab is open, reads what the picked tab shows. A page that can start a run drops
+    /// the session, since the run attaches its own.
+    pub async fn look(&mut self, port: u16, classify: bool) -> Sighting {
+        if !classify {
+            return match self.connection(port).await {
+                Connection::Lms { title, url } => Sighting::Lms { title, url, page: None },
+                Connection::NoLmsTab => Sighting::NoLmsTab,
+                Connection::NotRunning | Connection::Checking => Sighting::NotRunning,
+            };
+        }
+        let Some(tabs) = page_tabs(port) else {
+            self.lms = None;
+            return Sighting::NotRunning;
+        };
+        let Some(first) = tabs.iter().find(|t| t.is_lms()) else {
+            self.lms = None;
+            return Sighting::NoLmsTab;
+        };
+        let looked = tokio::time::timeout(LOOK_TIMEOUT, async {
+            let tab = self.pick(port, &tabs).await?;
+            let page = classify_page(self.lms.as_ref()?).await.ok();
+            Some((tab, page))
+        })
+        .await
+        .ok()
+        .flatten();
+        let (tab, page) = looked.unwrap_or_else(|| (first.clone(), None));
         if page.is_none() || matches!(page, Some(PageKind::Mode(_))) {
             self.lms = None;
         }
-        Sighting::Lms { title, url, page }
-    }
-
-    async fn classify(&mut self, port: u16) -> Option<PageKind> {
-        let alive = match &self.lms {
-            Some(lms) => lms.current_url().await.is_ok_and(|url| url.contains(LMS_HOST)),
-            None => false,
-        };
-        if !alive {
-            self.lms = Some(attach_to_lms(port).await.ok()?);
-        }
-        classify_page(self.lms.as_ref()?).await.ok()
+        Sighting::Lms { title: tab.title, url: tab.url, page }
     }
 }
 
@@ -460,32 +449,19 @@ mod tests {
     }
 
     #[test]
-    fn the_first_lms_page_target_is_the_lms_tab() {
-        let targets = json!([
-            { "type": "service_worker", "title": "sw", "url": "https://lms.binus.ac.id/sw.js" },
-            { "type": "page", "title": "New Tab", "url": "chrome://newtab/" },
-            { "type": "page", "title": "Unit 5", "url": "https://lms.binus.ac.id/course/5" },
-            { "type": "page", "title": "Other", "url": "https://lms.binus.ac.id/course/6" },
-        ]);
+    fn without_asking_the_tabs_the_first_listed_lms_tab_is_the_lms_tab() {
+        let tab = |id: &str, url: &str| ListedTab { id: id.into(), title: id.into(), url: url.into() };
+        let tabs = [
+            tab("New Tab", "chrome://newtab/"),
+            tab("Unit 5", "https://lms.binus.ac.id/course/5"),
+            tab("Other", "https://lms.binus.ac.id/course/6"),
+        ];
         assert_eq!(
-            Connection::from_targets(&targets),
+            Connection::from_tabs(&tabs),
             Connection::Lms { title: "Unit 5".into(), url: "https://lms.binus.ac.id/course/5".into() }
         );
-        assert_eq!(Connection::from_targets(&json!([{ "type": "page", "url": "about:blank" }])), Connection::NoLmsTab);
-        assert_eq!(
-            Connection::from_targets(&Value::Null),
-            Connection::NoLmsTab,
-            "an unreadable list still means running"
-        );
-    }
-
-    #[test]
-    fn a_response_is_cut_at_its_content_length() {
-        let data = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\ncontent-length: 2\r\n\r\n[]extra";
-        let (head, body) = split_response(data).unwrap();
-        assert_eq!(content_length(head), Some(2));
-        assert_eq!(&body[..2], b"[]");
-        assert_eq!(split_response(b"HTTP/1.1 200 OK\r\n"), None);
+        assert_eq!(Connection::from_tabs(&tabs[..1]), Connection::NoLmsTab);
+        assert_eq!(Connection::from_tabs(&[]), Connection::NoLmsTab, "an unreadable list still means running");
     }
 
     #[test]

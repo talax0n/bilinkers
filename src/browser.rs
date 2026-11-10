@@ -5,7 +5,9 @@ use futures::StreamExt;
 use serde_json::{json, Value};
 use tokio::task::JoinHandle;
 
+use crate::devtools::{page_tabs, ListedTab};
 use crate::frame::{evaluate_top, FrameEvaluator};
+use crate::logger;
 use crate::question_types::Dom;
 
 pub const LMS_HOST: &str = "lms.binus.ac.id";
@@ -14,6 +16,8 @@ pub const LMS_HOST: &str = "lms.binus.ac.id";
 pub struct Lms {
     pub browser: Browser,
     pub page: Page,
+    /// The listed tab `page` is.
+    pub tab: ListedTab,
     frames: FrameEvaluator,
     events: JoinHandle<()>,
 }
@@ -46,29 +50,143 @@ impl std::fmt::Display for AttachError {
 
 impl std::error::Error for AttachError {}
 
-/// Attaches to the browser started with --remote-debugging-port and picks the first LMS tab,
-/// like src/browser.js attachToLms. CDP directly, so no chromedriver is involved.
-pub async fn attach_to_lms(port: u16) -> Result<Lms, AttachError> {
+impl From<chromiumoxide::error::CdpError> for AttachError {
+    fn from(err: chromiumoxide::error::CdpError) -> Self {
+        AttachError::Connect(err.to_string())
+    }
+}
+
+/// What a tab says about itself: `document.visibilityState` and `document.hasFocus()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TabView {
+    pub visible: bool,
+    pub focused: bool,
+}
+
+/// Why a tab was picked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickReason {
+    /// Visible in the window that has the keyboard focus.
+    Focused,
+    /// The active tab of some window.
+    Visible,
+    /// No tab said it was visible, so the first one listed.
+    First,
+}
+
+impl PickReason {
+    pub fn name(self) -> &'static str {
+        match self {
+            PickReason::Focused => "focused",
+            PickReason::Visible => "visible",
+            PickReason::First => "first",
+        }
+    }
+}
+
+/// The tab the user is looking at, from views in `/json/list` order (None: it did not answer).
+/// Visible and focused wins, then visible, then the first; ties go to the first listed, which
+/// Chromium orders most recently activated first.
+pub fn choose_tab(views: &[Option<TabView>]) -> Option<(usize, PickReason)> {
+    let find = |want: fn(&TabView) -> bool| views.iter().position(|v| v.as_ref().is_some_and(want));
+    find(|v| v.visible && v.focused)
+        .map(|i| (i, PickReason::Focused))
+        .or_else(|| find(|v| v.visible).map(|i| (i, PickReason::Visible)))
+        .or_else(|| (!views.is_empty()).then_some((0, PickReason::First)))
+}
+
+const TAB_VIEW: &str = "return {v: document.visibilityState, f: document.hasFocus()};";
+
+// A frozen background tab can leave Runtime.evaluate unanswered (seen live on Brave).
+const VIEW_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// Reads a tab's visibility; evaluating neither focuses it nor brings it to front.
+async fn tab_view(page: &Page) -> Option<TabView> {
+    let value = tokio::time::timeout(VIEW_TIMEOUT, evaluate_top(page, TAB_VIEW, &[])).await.ok()?.ok()?;
+    Some(TabView { visible: value["v"] == "visible", focused: value["f"] == true })
+}
+
+/// The LMS tab from `tabs` (listing order) that the user is looking at, as a page of `browser`.
+pub async fn pick_lms_page(
+    browser: &mut Browser,
+    tabs: &[ListedTab],
+) -> Result<Option<(Page, ListedTab, PickReason)>, AttachError> {
+    let lms: Vec<&ListedTab> = tabs.iter().filter(|t| t.is_lms()).collect();
+    if lms.is_empty() {
+        return Ok(None);
+    }
+    let mut pages = browser.pages().await?;
+    let known = |pages: &[Page], id: &str| pages.iter().any(|p| p.target_id().as_ref() == id);
+    if lms.iter().any(|t| !known(&pages, &t.id)) {
+        // A tab opened since the last fetch is only a page once the targets are fetched again.
+        browser.fetch_targets().await?;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        pages = browser.pages().await?;
+    }
+    let found: Vec<Option<Page>> =
+        lms.iter().map(|t| pages.iter().find(|p| p.target_id().as_ref() == t.id).cloned()).collect();
+    let views = futures::future::join_all(found.iter().map(|page| async move {
+        match page {
+            Some(page) => tab_view(page).await,
+            None => None,
+        }
+    }))
+    .await;
+    let Some((index, why)) = choose_tab(&views) else { return Ok(None) };
+    let page = match &found[index] {
+        Some(page) => page.clone(),
+        None => return Err(AttachError::Connect(format!("tab {} is not attachable yet", lms[index].id))),
+    };
+    Ok(Some((page, lms[index].clone(), why)))
+}
+
+fn log_pick(tab: &ListedTab, why: PickReason) {
+    logger::info("Picked LMS tab", [("url", json!(tab.url)), ("title", json!(tab.title)), ("why", json!(why.name()))]);
+}
+
+/// Connects to the browser started with --remote-debugging-port and picks the LMS tab the user
+/// is looking at, without bringing it to front. CDP directly, so no chromedriver is involved.
+pub async fn open_lms(port: u16) -> Result<Lms, AttachError> {
     let (mut browser, mut handler) =
         Browser::connect(format!("http://localhost:{port}")).await.map_err(|e| AttachError::Connect(e.to_string()))?;
     let events = tokio::spawn(async move { while handler.next().await.is_some() {} });
 
     // Tabs that existed before we connected are only known after a target fetch.
-    browser.fetch_targets().await.map_err(|e| AttachError::Connect(e.to_string()))?;
+    browser.fetch_targets().await?;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let pages = browser.pages().await.map_err(|e| AttachError::Connect(e.to_string()))?;
-
-    let mut urls = Vec::new();
-    for page in pages {
-        let url = page.url().await.ok().flatten().unwrap_or_default();
-        if url.contains(LMS_HOST) {
-            // Pointer events stall on a background tab, and switchTo().window() activated it too.
-            page.bring_to_front().await.map_err(|e| AttachError::Connect(e.to_string()))?;
-            return Ok(Lms { browser, page, frames: FrameEvaluator::default(), events });
+    let tabs = page_tabs(port).ok_or_else(|| AttachError::Connect("/json/list did not answer".into()))?;
+    match pick_lms_page(&mut browser, &tabs).await? {
+        Some((page, tab, why)) => {
+            log_pick(&tab, why);
+            Ok(Lms { browser, page, tab, frames: FrameEvaluator::default(), events })
         }
-        urls.push(url);
+        None => {
+            events.abort();
+            Err(AttachError::NoLmsTab(tabs.into_iter().map(|t| t.url).collect()))
+        }
     }
-    Err(AttachError::NoLmsTab(urls))
+}
+
+/// `open_lms`, then brings the picked tab to front, since pointer events stall on a background tab.
+pub async fn attach_to_lms(port: u16) -> Result<Lms, AttachError> {
+    let lms = open_lms(port).await?;
+    lms.page.bring_to_front().await?;
+    Ok(lms)
+}
+
+impl Lms {
+    /// Picks again over this session and switches to the new tab when the pick moved; logs only
+    /// a move. Fails when the session no longer answers.
+    pub async fn repick(&mut self, tabs: &[ListedTab]) -> Result<Option<PickReason>, AttachError> {
+        let Some((page, tab, why)) = pick_lms_page(&mut self.browser, tabs).await? else { return Ok(None) };
+        if tab.id != self.tab.id {
+            log_pick(&tab, why);
+            self.page = page;
+            self.frames = FrameEvaluator::default();
+        }
+        self.tab = tab;
+        Ok(Some(why))
+    }
 }
 
 /// A browser call that failed: a CDP error, a page script exception, or a runner giving up.
@@ -491,6 +609,29 @@ mod tests {
             .into_iter()
             .collect();
         assert_eq!(order, vec!["default", "iframe", "default", "iframe"]);
+    }
+
+    const HIDDEN: Option<TabView> = Some(TabView { visible: false, focused: false });
+    const VISIBLE: Option<TabView> = Some(TabView { visible: true, focused: false });
+    const FOCUSED: Option<TabView> = Some(TabView { visible: true, focused: true });
+
+    #[test]
+    fn the_focused_tab_wins_then_a_visible_one_then_the_first_listed() {
+        assert_eq!(choose_tab(&[HIDDEN, VISIBLE, FOCUSED]), Some((2, PickReason::Focused)));
+        assert_eq!(choose_tab(&[HIDDEN, None, VISIBLE]), Some((2, PickReason::Visible)));
+        assert_eq!(choose_tab(&[HIDDEN, HIDDEN]), Some((0, PickReason::First)));
+        assert_eq!(choose_tab(&[None, None]), Some((0, PickReason::First)), "no tab answered");
+        assert_eq!(choose_tab(&[]), None);
+    }
+
+    #[test]
+    fn among_visible_tabs_the_first_listed_wins() {
+        assert_eq!(choose_tab(&[HIDDEN, VISIBLE, VISIBLE]), Some((1, PickReason::Visible)));
+        assert_eq!(choose_tab(&[FOCUSED, FOCUSED]), Some((0, PickReason::Focused)));
+        // A focused document that is hidden can't be the one in view.
+        let odd = Some(TabView { visible: false, focused: true });
+        assert_eq!(choose_tab(&[odd, VISIBLE]), Some((1, PickReason::Visible)));
+        assert_eq!(PickReason::First.name(), "first");
     }
 
     #[tokio::test]
