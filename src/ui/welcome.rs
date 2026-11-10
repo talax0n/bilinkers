@@ -3,14 +3,16 @@
 use rune::tok::{self, type_};
 use rune::{col, el, row, text, Color, Cursor, El, ScrollSpec};
 
-use crate::setup::{BrowserKind, BrowserPick, CodexStatus, Origin};
+use crate::setup::{BrowserPick, CodexStatus, Origin};
 use crate::ui::flow::{Codex, Flow, Input};
-use crate::ui::style::{badge, button, card, dot, Kind, Tones, HEADING, STEP_TITLE, SUBHEADING, TITLE};
+use crate::ui::style::{badge, button, card, dot, Kind, Tones, HEADING, SMALL, STEP_TITLE, SUBHEADING, TITLE};
 use crate::ui::{send, Ui};
 
 pub const CODEX_INSTALL: &str =
     "Codex is not installed. Install it with npm i -g @openai/codex (or from the Codex CLI page), then press Retry.";
 pub const SIGNING_IN: &str = "Waiting for sign-in in your browser...";
+pub const NONE_FOUND: &str =
+    "Searched this computer for Google Chrome, Brave, Microsoft Edge and Chromium and found none. Choose the browser program instead.";
 
 /// "Signed in with ChatGPT" for a ChatGPT login, the CLI's own words otherwise.
 pub fn signed_in_text(line: &str) -> String {
@@ -105,25 +107,24 @@ fn codex_step(flow: &Flow, t: &tok::Theme, tones: &Tones) -> El {
     )
 }
 
-/// One browser as a radio card.
-fn choice(key: String, label: String, selected: bool, input: Input, t: &tok::Theme, tones: &Tones) -> El {
+/// One browser as a radio card: its name, and below it where it is.
+fn choice(key: String, label: String, path: String, selected: bool, input: Input, t: &tok::Theme, tones: &Tones) -> El {
     let mark = if selected {
         el().size(16.0, 16.0).radius(8.0).border(5.0, tones.accent).fill(tones.on_accent)
     } else {
         el().size(16.0, 16.0).radius(8.0).border(1.0, t.control_off).fill(t.card)
     };
     row()
-        .key(key)
+        .key(key.clone())
         .role("radio")
         .label(label.clone())
         .checked(selected)
         .focusable(true)
         .focus_selected(selected)
         .focus_ring(2.0, 2.0, tones.accent)
-        .w(0.0)
-        .grow(1.0)
+        .w_full()
         .min_w(0.0)
-        .h(44.0)
+        .h(48.0)
         .px(12.0)
         .gap(10.0)
         .center_y()
@@ -134,7 +135,14 @@ fn choice(key: String, label: String, selected: bool, input: Input, t: &tok::The
         .cursor(Cursor::Pointer)
         .on_press_tx(move |s: &mut Ui, tx| send(s, input.clone(), tx))
         .child(mark)
-        .child(text(label).font(type_::TITLE).color(t.text).grow(1.0).min_w(0.0).truncate())
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(1.0)
+                .child(text(label).font(type_::TITLE).color(t.text).truncate())
+                .child(text(path).key(format!("{key}-path")).font(SMALL).color(t.text_secondary).truncate()),
+        )
 }
 
 fn origin_text(origin: Origin) -> &'static str {
@@ -169,14 +177,15 @@ fn browser_step(flow: &Flow, t: &tok::Theme, tones: &Tones) -> El {
         };
     } else {
         let mut choices =
-            row().key("browsers").role("radiogroup").label("Browser").focus_group().focus_follows().w_full().gap(8.0);
-        for kind in &b.installed {
-            let selected = b.pick == Some(BrowserPick::Installed(*kind));
+            col().key("browsers").role("radiogroup").label("Browser").focus_group().focus_follows().w_full().gap(6.0);
+        for found in &b.installed {
+            let kind = found.kind;
             choices = choices.child(choice(
                 format!("browser-{}", kind.key()),
                 kind.label().to_string(),
-                selected,
-                Input::PickBrowser(*kind),
+                found.path.display().to_string(),
+                b.pick == Some(BrowserPick::Installed(kind)),
+                Input::PickBrowser(kind),
                 t,
                 tones,
             ));
@@ -184,16 +193,11 @@ fn browser_step(flow: &Flow, t: &tok::Theme, tones: &Tones) -> El {
         if let Some(BrowserPick::File(path)) = &b.pick {
             let name =
                 path.file_stem().map_or_else(|| path.display().to_string(), |f| f.to_string_lossy().into_owned());
-            choices = choices.child(choice("browser-file".into(), name, true, Input::ChooseFile, t, tones));
+            let shown = path.display().to_string();
+            choices = choices.child(choice("browser-file".into(), name, shown, true, Input::ChooseFile, t, tones));
         }
         if b.installed.is_empty() {
-            let names: Vec<&str> = BrowserKind::ALL.iter().map(|k| k.label()).collect();
-            body = body.child(status_line(
-                "browser-status",
-                tones.warn,
-                format!("{} were not found in the usual place. Choose the browser program instead.", names.join(", ")),
-                t,
-            ));
+            body = body.child(status_line("browser-status", tones.warn, NONE_FOUND.to_string(), t));
             action =
                 Some(button("choose-file", "Choose file...", Kind::Secondary, true, t, tones, |s: &mut Ui, tx| {
                     send(s, Input::ChooseFile, tx)

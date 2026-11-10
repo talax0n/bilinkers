@@ -12,7 +12,7 @@ use rune::machine::Effects;
 use crate::detect::PageKind;
 use crate::logger::Event;
 use crate::session::{BrowserSetup, Connection, RunMode, Sighting};
-use crate::setup::{BrowserKind, BrowserPick, CodexStatus, Origin};
+use crate::setup::{BrowserKind, BrowserPick, CodexStatus, FoundBrowser, Origin};
 use crate::ui::dashboard::{Dashboard, RunStatus};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,10 +45,10 @@ pub enum Codex {
     Known(CodexStatus),
 }
 
-/// The browser step: what is installed, what the settings resolve to, and the pick on screen.
+/// The browser step: what the search found, what the settings resolve to, and the pick on screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserStep {
-    pub installed: Vec<BrowserKind>,
+    pub installed: Vec<FoundBrowser>,
     /// What the settings resolve to right now.
     pub setup: BrowserSetup,
     /// Set when the environment or `.env` chooses the browser, which outranks the window.
@@ -60,11 +60,11 @@ pub struct BrowserStep {
 
 impl BrowserStep {
     /// Preselects the current setting when it is installed, else the first installed browser.
-    pub fn new(installed: Vec<BrowserKind>, setup: BrowserSetup, locked_by: Option<Origin>) -> BrowserStep {
-        let current = BrowserKind::parse(&setup.name).filter(|kind| installed.contains(kind));
+    pub fn new(installed: Vec<FoundBrowser>, setup: BrowserSetup, locked_by: Option<Origin>) -> BrowserStep {
+        let current = BrowserKind::parse(&setup.name).filter(|kind| installed.iter().any(|f| f.kind == *kind));
         let pick = match (&setup.binary, current) {
             (Ok(path), None) if setup.name == "custom" => Some(BrowserPick::File(PathBuf::from(path))),
-            _ => current.or(installed.first().copied()).map(BrowserPick::Installed),
+            _ => current.or(installed.first().map(|f| f.kind)).map(BrowserPick::Installed),
         };
         BrowserStep { installed, setup, locked_by, pick, error: None }
     }
@@ -325,12 +325,16 @@ mod tests {
         BrowserSetup { name: "brave".into(), binary: Ok("/bin/brave".into()) }
     }
 
+    fn found(kinds: &[BrowserKind]) -> Vec<FoundBrowser> {
+        kinds.iter().map(|&kind| FoundBrowser { kind, path: format!("/bin/{}", kind.key()).into() }).collect()
+    }
+
     fn signed_in() -> CodexStatus {
         CodexStatus::SignedIn("Logged in using ChatGPT".into())
     }
 
     fn home() -> Flow {
-        let flow = Flow::new(signed_in(), BrowserStep::new(vec![BrowserKind::Brave], brave(), None), None);
+        let flow = Flow::new(signed_in(), BrowserStep::new(found(&[BrowserKind::Brave]), brave(), None), None);
         assert_eq!(flow.screen, Screen::Home);
         flow
     }
@@ -366,20 +370,20 @@ mod tests {
     #[test]
     fn the_welcome_screen_shows_until_codex_is_signed_in_and_the_browser_works() {
         let missing_chrome = BrowserSetup { name: "chrome".into(), binary: Err("not installed".into()) };
-        let brave_only = || BrowserStep::new(vec![BrowserKind::Brave], missing_chrome.clone(), None);
+        let brave_only = || BrowserStep::new(found(&[BrowserKind::Brave]), missing_chrome.clone(), None);
         assert_eq!(Flow::new(CodexStatus::SignedOut, brave_only(), None).screen, Screen::Welcome);
         assert_eq!(Flow::new(signed_in(), brave_only(), None).screen, Screen::Welcome, "chrome is not installed");
-        let step = BrowserStep::new(vec![BrowserKind::Brave], brave(), None);
+        let step = BrowserStep::new(found(&[BrowserKind::Brave]), brave(), None);
         assert_eq!(Flow::new(CodexStatus::Missing, step.clone(), None).screen, Screen::Welcome);
         assert_eq!(Flow::new(signed_in(), step, None).screen, Screen::Home);
     }
 
     #[test]
     fn the_browser_step_preselects_the_setting_else_the_first_installed() {
-        let all = BrowserKind::ALL.to_vec();
+        let all = found(&BrowserKind::ALL);
         assert_eq!(BrowserStep::new(all.clone(), brave(), None).pick, Some(BrowserPick::Installed(BrowserKind::Brave)));
         let chrome = BrowserSetup { name: "chrome".into(), binary: Err("missing".into()) };
-        let step = BrowserStep::new(vec![BrowserKind::Brave, BrowserKind::Edge], chrome.clone(), None);
+        let step = BrowserStep::new(found(&[BrowserKind::Brave, BrowserKind::Edge]), chrome.clone(), None);
         assert_eq!(step.pick, Some(BrowserPick::Installed(BrowserKind::Brave)));
         assert!(step.done(), "a pick is enough; Continue saves it");
         let none = BrowserStep::new(vec![], chrome.clone(), None);
@@ -393,7 +397,7 @@ mod tests {
 
     #[test]
     fn signing_in_runs_codex_login_then_checks_again() {
-        let step = BrowserStep::new(vec![BrowserKind::Brave], brave(), None);
+        let step = BrowserStep::new(found(&[BrowserKind::Brave]), brave(), None);
         let mut f = Flow::new(CodexStatus::SignedOut, step, None);
         assert!(!f.welcome_done());
         assert_eq!(effects(&mut f, Input::Continue), vec![], "Continue waits for the sign-in");
@@ -410,14 +414,14 @@ mod tests {
             vec![Effect::SaveBrowser(BrowserPick::Installed(BrowserKind::Brave))]
         );
         assert_eq!(f.screen, Screen::Welcome, "Home waits for the save");
-        let saved = BrowserStep::new(vec![BrowserKind::Brave], brave(), None);
+        let saved = BrowserStep::new(found(&[BrowserKind::Brave]), brave(), None);
         assert_eq!(effects(&mut f, Input::BrowserSaved(Ok(saved))), vec![Effect::Probe]);
         assert_eq!(f.screen, Screen::Home);
     }
 
     #[test]
     fn a_missing_codex_offers_retry_not_sign_in() {
-        let step = BrowserStep::new(vec![BrowserKind::Brave], brave(), None);
+        let step = BrowserStep::new(found(&[BrowserKind::Brave]), brave(), None);
         let mut f = Flow::new(CodexStatus::Missing, step, None);
         assert!(!f.can_sign_in());
         assert_eq!(effects(&mut f, Input::SignIn), vec![]);
@@ -427,7 +431,7 @@ mod tests {
 
     #[test]
     fn a_failed_save_stays_on_welcome_and_a_locked_browser_is_not_saved() {
-        let step = BrowserStep::new(BrowserKind::ALL.to_vec(), brave(), None);
+        let step = BrowserStep::new(found(&BrowserKind::ALL), brave(), None);
         let mut f = Flow::new(CodexStatus::SignedOut, step, None);
         effects(&mut f, Input::CodexChecked(signed_in()));
         effects(&mut f, Input::PickBrowser(BrowserKind::Edge));
@@ -438,7 +442,7 @@ mod tests {
         effects(&mut f, Input::BrowserSaved(Err("read-only disk".into())));
         assert_eq!((&f.screen, f.browser.error.as_deref()), (&Screen::Welcome, Some("read-only disk")));
 
-        let locked = BrowserStep::new(BrowserKind::ALL.to_vec(), brave(), Some(Origin::DotEnv));
+        let locked = BrowserStep::new(found(&BrowserKind::ALL), brave(), Some(Origin::DotEnv));
         let mut f = Flow::new(CodexStatus::SignedOut, locked, None);
         effects(&mut f, Input::PickBrowser(BrowserKind::Edge));
         assert_eq!(f.browser.pick, Some(BrowserPick::Installed(BrowserKind::Brave)), "the .env choice stands");
@@ -504,7 +508,7 @@ mod tests {
 
     #[test]
     fn a_cli_mode_skips_detection_once_and_final_test_is_never_preset() {
-        let step = || BrowserStep::new(vec![BrowserKind::Brave], brave(), None);
+        let step = || BrowserStep::new(found(&[BrowserKind::Brave]), brave(), None);
         assert_eq!(Flow::new(signed_in(), step(), Some(RunMode::FinalTest)).preset, None);
         let mut f = Flow::new(signed_in(), step(), Some(RunMode::Reading));
         effects(&mut f, Input::Start);

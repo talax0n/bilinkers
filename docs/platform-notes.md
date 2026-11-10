@@ -11,7 +11,7 @@ What the bot knows about lms.binus.ac.id and the Beelingua course pages. Most fa
 - The bot talks CDP directly through chromiumoxide, so no chromedriver is needed. It uses the first tab whose URL contains `lms.binus.ac.id` and brings it to front. Pointer clicks hang in a background tab. (src/browser.rs, attach_to_lms)
 - The DevTools HTTP endpoint only answers HTTP/1.1 probes and may keep the connection open, so a probe reads up to Content-Length. (src/session.rs)
 - The activity iframe is cross-origin, so it is its own CDP target. The bot attaches to it by the iframe's frame id (which is its target id) and looks it up fresh on every call, so a reloaded iframe is picked up. It reattaches only when the connection drops, never when a script throws, so a click never runs twice. (src/frame.rs)
-- CDP attach works only with Chromium browsers (Chrome, Brave, Edge).
+- CDP attach works only with Chromium browsers (Chrome, Brave, Edge, Chromium).
 
 Window:
 

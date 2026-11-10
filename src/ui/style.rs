@@ -40,6 +40,8 @@ pub const HEADING: TextStyle = TextStyle::new(15.0, 600.0);
 pub const SUBHEADING: TextStyle = TextStyle::new(15.0, 400.0);
 pub const TITLE: TextStyle = TextStyle::new(20.0, 600.0);
 pub const STEP_TITLE: TextStyle = TextStyle::new(14.0, 600.0);
+/// Secondary detail under a label, such as a found browser's path.
+pub const SMALL: TextStyle = TextStyle::new(11.5, 400.0).lh(15.0);
 const BUTTON: TextStyle = TextStyle::new(13.0, 500.0);
 const BIG_BUTTON: TextStyle = TextStyle::new(16.0, 600.0);
 

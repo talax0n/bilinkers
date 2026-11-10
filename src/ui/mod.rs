@@ -17,7 +17,7 @@ use rune::{col, App, AppHandle, AppSpec, Chrome, Cx, El, FileDialogOptions, Late
 
 use crate::logger::{self, Event, Level, Sink};
 use crate::session::{BrowserSetup, Connection, RunMode, Sighting};
-use crate::setup::{browser_executable, BrowserKind, BrowserPick, CodexStatus};
+use crate::setup::{browser_executable, BrowserKind, BrowserPick, CodexStatus, FoundBrowser};
 pub use dashboard::{demo_events, Dashboard, DemoEvent, RunStatus, MAX_LOG_LINES};
 pub use flow::BrowserStep;
 use flow::{step, Effect, Flow, Input, Screen};
@@ -283,12 +283,19 @@ mod demo {
         CodexStatus::SignedIn("Logged in using ChatGPT".into())
     }
 
+    /// What the search finds on a typical Mac: Chrome dragged into ~/Applications, Brave and
+    /// Edge in /Applications.
+    pub fn found() -> Vec<FoundBrowser> {
+        let at = |kind, path: &str| FoundBrowser { kind, path: path.into() };
+        vec![
+            at(BrowserKind::Chrome, "/Users/student/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            at(BrowserKind::Brave, BRAVE),
+            at(BrowserKind::Edge, "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+        ]
+    }
+
     pub fn brave() -> BrowserStep {
-        BrowserStep::new(
-            vec![BrowserKind::Brave, BrowserKind::Edge],
-            BrowserSetup { name: "brave".into(), binary: Ok(BRAVE.into()) },
-            None,
-        )
+        BrowserStep::new(found(), BrowserSetup { name: "brave".into(), binary: Ok(BRAVE.into()) }, None)
     }
 
     pub fn info() -> StartInfo {
@@ -388,7 +395,7 @@ mod demo {
     }
 
     fn nothing_installed() -> BrowserStep {
-        let missing = "BROWSER=chrome defaults to \"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\", but it's not installed there.";
+        let missing = "BROWSER=chrome: searched /Applications, ~/Applications and Spotlight for Google Chrome.app and did not find Google Chrome.";
         BrowserStep::new(vec![], BrowserSetup { name: "chrome".into(), binary: Err(missing.into()) }, None)
     }
 
@@ -411,7 +418,7 @@ mod demo {
         ("welcome-done", |s| welcome(s, Codex::Known(signed_in()), brave())),
         ("welcome-locked", |s| {
             let locked = BrowserStep::new(
-                vec![BrowserKind::Brave],
+                found(),
                 BrowserSetup { name: "brave".into(), binary: Ok(BRAVE.into()) },
                 Some(Origin::DotEnv),
             );
@@ -555,6 +562,18 @@ mod tests {
         frames_until(&mut rt, |s| matches!(s.flow.screen, Screen::Running(_)));
         assert!(rt.find("stop").is_some());
         assert_eq!(shown(&rt, "mode").as_deref(), Some("Unit"));
+    }
+
+    #[test]
+    fn the_welcome_screen_lists_each_found_browser_with_its_path() {
+        let info = StartInfo { codex: CodexStatus::SignedOut, ..demo::info() };
+        let mut rt = runtime(ui(info, demo::FakeHost::default(), mpsc::channel().1), false);
+        rt.frame(0.0);
+        for found in demo::found() {
+            let path = shown(&rt, &format!("browser-{}-path", found.kind.key()));
+            assert_eq!(path, Some(found.path.display().to_string()));
+        }
+        assert!(rt.find("browser-chromium").is_none(), "only what the search found");
     }
 
     #[test]

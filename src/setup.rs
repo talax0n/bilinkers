@@ -106,17 +106,20 @@ pub enum BrowserKind {
     Chrome,
     Brave,
     Edge,
+    Chromium,
 }
 
 impl BrowserKind {
     /// Chrome first, the order choices are shown and preselected in.
-    pub const ALL: [BrowserKind; 3] = [BrowserKind::Chrome, BrowserKind::Brave, BrowserKind::Edge];
+    pub const ALL: [BrowserKind; 4] =
+        [BrowserKind::Chrome, BrowserKind::Brave, BrowserKind::Edge, BrowserKind::Chromium];
 
     pub fn key(self) -> &'static str {
         match self {
             BrowserKind::Chrome => "chrome",
             BrowserKind::Brave => "brave",
             BrowserKind::Edge => "edge",
+            BrowserKind::Chromium => "chromium",
         }
     }
 
@@ -129,36 +132,156 @@ impl BrowserKind {
             BrowserKind::Chrome => "Google Chrome",
             BrowserKind::Brave => "Brave",
             BrowserKind::Edge => "Microsoft Edge",
+            BrowserKind::Chromium => "Chromium",
         }
     }
 
-    /// Where the installer puts it on `os` (`std::env::consts::OS`).
-    pub fn default_path(self, os: &str) -> Option<&'static str> {
-        Some(match (os, self) {
-            ("macos", BrowserKind::Chrome) => "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            ("macos", BrowserKind::Brave) => "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-            ("macos", BrowserKind::Edge) => "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-            ("windows", BrowserKind::Chrome) => r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            ("windows", BrowserKind::Brave) => r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
-            ("windows", BrowserKind::Edge) => r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-            _ => return None,
-        })
+    /// The macOS app's name, which is also its executable's name inside Contents/MacOS.
+    fn mac_app(self) -> &'static str {
+        match self {
+            BrowserKind::Chrome => "Google Chrome",
+            BrowserKind::Brave => "Brave Browser",
+            BrowserKind::Edge => "Microsoft Edge",
+            BrowserKind::Chromium => "Chromium",
+        }
+    }
+
+    fn bundle_id(self) -> &'static str {
+        match self {
+            BrowserKind::Chrome => "com.google.Chrome",
+            BrowserKind::Brave => "com.brave.Browser",
+            BrowserKind::Edge => "com.microsoft.edgemac",
+            BrowserKind::Chromium => "org.chromium.Chromium",
+        }
+    }
+
+    /// Below %ProgramFiles%, %ProgramFiles(x86)% or %LOCALAPPDATA%.
+    fn windows_exe(self) -> &'static str {
+        match self {
+            BrowserKind::Chrome => r"Google\Chrome\Application\chrome.exe",
+            BrowserKind::Brave => r"BraveSoftware\Brave-Browser\Application\brave.exe",
+            BrowserKind::Edge => r"Microsoft\Edge\Application\msedge.exe",
+            BrowserKind::Chromium => r"Chromium\Application\chrome.exe",
+        }
+    }
+
+    fn linux_names(self) -> &'static [&'static str] {
+        match self {
+            BrowserKind::Chrome => &["google-chrome", "google-chrome-stable"],
+            BrowserKind::Brave => &["brave-browser", "brave"],
+            BrowserKind::Edge => &["microsoft-edge", "microsoft-edge-stable"],
+            BrowserKind::Chromium => &["chromium", "chromium-browser"],
+        }
+    }
+
+    /// Where `find_browser` looks on `os`, for an error that says what was searched.
+    pub fn searched(self, os: &str) -> String {
+        match os {
+            "macos" => format!("/Applications, ~/Applications and Spotlight for {}.app", self.mac_app()),
+            "windows" => format!("Program Files, Program Files (x86) and AppData\\Local for {}", self.windows_exe()),
+            _ => format!("PATH for {}", self.linux_names().join(", ")),
+        }
     }
 }
 
-/// The browsers installed at their default paths on `os`, Chrome first.
-pub fn installed_browsers(os: &str, exists: impl Fn(&Path) -> bool) -> Vec<BrowserKind> {
-    BrowserKind::ALL.into_iter().filter(|kind| kind.default_path(os).is_some_and(|p| exists(Path::new(p)))).collect()
+/// A browser the search found, with the executable to launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoundBrowser {
+    pub kind: BrowserKind,
+    pub path: PathBuf,
+}
+
+/// What the browser search reads from the machine, passed in so tests can fake it.
+pub struct Probe<'a> {
+    /// `std::env::consts::OS`.
+    pub os: &'a str,
+    pub var: &'a dyn Fn(&str) -> Option<OsString>,
+    pub exists: &'a dyn Fn(&Path) -> bool,
+    /// App bundles Spotlight knows for a bundle id; empty when it can't say.
+    pub spotlight: &'a dyn Fn(&str) -> Vec<PathBuf>,
+}
+
+/// The `kind` executable on this machine: the usual install places for the OS, then (macOS
+/// only) Spotlight, which finds an app wherever it was dragged.
+pub fn find_browser(kind: BrowserKind, probe: &Probe) -> Option<PathBuf> {
+    let set = |name: &str| (probe.var)(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let exists = |path: &PathBuf| (probe.exists)(path);
+    match probe.os {
+        "macos" => {
+            let app = format!("{}.app", kind.mac_app());
+            let mut dirs = vec![PathBuf::from("/Applications")];
+            dirs.extend(set("HOME").map(|home| home.join("Applications")));
+            let mut in_dirs = dirs.into_iter().map(|dir| bundle_executable(&dir.join(&app), Some(kind.mac_app())));
+            in_dirs.find(exists).or_else(|| {
+                (probe.spotlight)(kind.bundle_id())
+                    .iter()
+                    .flat_map(|app| [bundle_executable(app, Some(kind.mac_app())), bundle_executable(app, None)])
+                    .find(exists)
+            })
+        }
+        "windows" => ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
+            .into_iter()
+            .filter_map(set)
+            .map(|dir| dir.join(kind.windows_exe()))
+            .find(exists),
+        _ => {
+            let dirs: Vec<PathBuf> =
+                (probe.var)("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+            dirs.iter().flat_map(|dir| kind.linux_names().iter().map(move |name| dir.join(name))).find(exists)
+        }
+    }
+}
+
+/// Every supported browser the search finds, Chrome first.
+pub fn find_browsers(probe: &Probe) -> Vec<FoundBrowser> {
+    BrowserKind::ALL
+        .into_iter()
+        .filter_map(|kind| find_browser(kind, probe).map(|path| FoundBrowser { kind, path }))
+        .collect()
+}
+
+/// Asks Spotlight for the app bundles with `bundle_id`; a missing or failing mdfind finds none.
+pub fn spotlight_apps(bundle_id: &str) -> Vec<PathBuf> {
+    let query = format!("kMDItemCFBundleIdentifier == '{bundle_id}'");
+    let Ok(output) = Command::new("mdfind").arg(query).stdin(Stdio::null()).stderr(Stdio::null()).output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// Searches this machine with the real environment, file system and Spotlight.
+pub fn search_this_machine(kind: Option<BrowserKind>) -> Vec<FoundBrowser> {
+    let var = |name: &str| std::env::var_os(name);
+    let spotlight = |id: &str| if cfg!(target_os = "macos") { spotlight_apps(id) } else { Vec::new() };
+    let probe = Probe { os: std::env::consts::OS, var: &var, exists: &Path::is_file, spotlight: &spotlight };
+    match kind {
+        Some(kind) => find_browser(kind, &probe).map(|path| FoundBrowser { kind, path }).into_iter().collect(),
+        None => find_browsers(&probe),
+    }
+}
+
+/// `app`/Contents/MacOS/`name`, the bundle's own stem when `name` is None.
+fn bundle_executable(app: &Path, name: Option<&str>) -> PathBuf {
+    let name = name.map(OsString::from).or_else(|| app.file_stem().map(OsStr::to_os_string)).unwrap_or_default();
+    app.join("Contents").join("MacOS").join(name)
 }
 
 /// The executable inside a picked macOS app bundle, or the picked file itself.
 pub fn browser_executable(picked: &Path) -> PathBuf {
     if picked.extension().is_some_and(|e| e == "app") {
-        let macos = picked.join("Contents").join("MacOS");
-        let named = picked.file_stem().map(|stem| macos.join(stem));
-        if let Some(named) = named.filter(|p| p.is_file()) {
+        let named = bundle_executable(picked, None);
+        if named.is_file() {
             return named;
         }
+        let macos = picked.join("Contents").join("MacOS");
         let files: Vec<PathBuf> = std::fs::read_dir(&macos)
             .into_iter()
             .flatten()
@@ -380,18 +503,106 @@ mod tests {
         assert_eq!(find_codex(Some(&path), Some(home), |_| false), None);
     }
 
+    type Vars = Vec<(&'static str, OsString)>;
+
+    /// Runs the search on `os` with these variables, files and Spotlight answers.
+    fn search(os: &str, vars: Vars, files: &[PathBuf], spotlight: &[(&str, &str)]) -> Vec<FoundBrowser> {
+        let var = |name: &str| vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.clone());
+        let exists = |p: &Path| files.iter().any(|f| f == p);
+        let apps = |id: &str| spotlight.iter().filter(|(i, _)| *i == id).map(|(_, app)| PathBuf::from(app)).collect();
+        find_browsers(&Probe { os, var: &var, exists: &exists, spotlight: &apps })
+    }
+
+    fn found(kind: BrowserKind, path: impl Into<PathBuf>) -> FoundBrowser {
+        FoundBrowser { kind, path: path.into() }
+    }
+
     #[test]
-    fn installed_browsers_are_the_ones_at_their_default_paths_chrome_first() {
-        let brave = BrowserKind::Brave.default_path("macos").unwrap();
-        assert_eq!(installed_browsers("macos", |p| p == Path::new(brave)), vec![BrowserKind::Brave]);
-        assert_eq!(installed_browsers("macos", |_| true), BrowserKind::ALL.to_vec());
-        assert_eq!(installed_browsers("macos", |_| false), vec![]);
-        assert_eq!(installed_browsers("linux", |_| true), vec![], "no default paths on Linux");
-        let edge = BrowserKind::Edge.default_path("windows").unwrap();
-        assert!(edge.ends_with("msedge.exe"));
-        assert_eq!(installed_browsers("windows", |p| p == Path::new(edge)), vec![BrowserKind::Edge]);
-        assert_eq!(BrowserKind::parse("Brave"), Some(BrowserKind::Brave));
+    fn on_macos_the_search_checks_both_applications_folders_then_spotlight() {
+        let home = vec![("HOME", OsString::from("/Users/u"))];
+        let brave = PathBuf::from("/Applications/Brave Browser.app/Contents/MacOS/Brave Browser");
+        let edge = PathBuf::from("/Users/u/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge");
+        let chrome = PathBuf::from("/Volumes/Apps/Chrome.app/Contents/MacOS/Google Chrome");
+        let files = [brave.clone(), edge.clone(), chrome.clone()];
+        let spotlight = [
+            ("com.google.Chrome", "/Volumes/Gone/Google Chrome.app"),
+            ("com.google.Chrome", "/Volumes/Apps/Chrome.app"),
+            ("org.chromium.Chromium", "/nowhere/Chromium.app"),
+        ];
+        assert_eq!(
+            search("macos", home.clone(), &files, &spotlight),
+            vec![
+                found(BrowserKind::Chrome, chrome),
+                found(BrowserKind::Brave, brave.clone()),
+                found(BrowserKind::Edge, edge)
+            ],
+            "Chrome only through Spotlight, its first hit without an executable skipped; Chromium's hit has none"
+        );
+        let renamed = PathBuf::from("/opt/My Chromium.app/Contents/MacOS/My Chromium");
+        let spotlight = [("org.chromium.Chromium", "/opt/My Chromium.app")];
+        assert_eq!(
+            search("macos", vec![], std::slice::from_ref(&renamed), &spotlight),
+            vec![found(BrowserKind::Chromium, renamed)],
+            "a renamed bundle's own executable"
+        );
+        assert_eq!(search("macos", home, &[], &[]), vec![], "Spotlight failing finds nothing");
+        assert_eq!(
+            search("macos", vec![], std::slice::from_ref(&brave), &[]),
+            vec![found(BrowserKind::Brave, brave)],
+            "no HOME"
+        );
+    }
+
+    #[test]
+    fn on_windows_the_search_checks_program_files_both_ways_and_local_app_data() {
+        let (pf, x86, local) = (r"C:\Program Files", r"C:\Program Files (x86)", r"C:\Users\u\AppData\Local");
+        let vars = vec![
+            ("ProgramFiles", OsString::from(pf)),
+            ("ProgramFiles(x86)", OsString::from(x86)),
+            ("LOCALAPPDATA", OsString::from(local)),
+        ];
+        let edge = PathBuf::from(x86).join(r"Microsoft\Edge\Application\msedge.exe");
+        let chrome = PathBuf::from(local).join(r"Google\Chrome\Application\chrome.exe");
+        let chromium = PathBuf::from(local).join(r"Chromium\Application\chrome.exe");
+        let brave = PathBuf::from(pf).join(r"BraveSoftware\Brave-Browser\Application\brave.exe");
+        let files = [edge.clone(), chrome.clone(), chromium.clone(), brave.clone()];
+        assert_eq!(
+            search("windows", vars.clone(), &files, &[]),
+            vec![
+                found(BrowserKind::Chrome, chrome),
+                found(BrowserKind::Brave, brave),
+                found(BrowserKind::Edge, edge),
+                found(BrowserKind::Chromium, chromium),
+            ]
+        );
+        let both = [PathBuf::from(pf).join(r"Google\Chrome\Application\chrome.exe"), files[1].clone()];
+        assert_eq!(search("windows", vars, &both, &[])[0].path, both[0], "Program Files before AppData");
+        assert_eq!(search("windows", vec![], &files, &[]), vec![], "no folders known");
+    }
+
+    #[test]
+    fn on_linux_the_search_looks_on_path_for_each_browsers_names() {
+        let path = std::env::join_paths(["/usr/local/bin", "/usr/bin", "/snap/bin"]).unwrap();
+        let vars = vec![("PATH", path)];
+        let files = [
+            PathBuf::from("/usr/bin/google-chrome-stable"),
+            PathBuf::from("/usr/local/bin/brave"),
+            PathBuf::from("/usr/bin/brave-browser"),
+            PathBuf::from("/snap/bin/chromium"),
+        ];
+        assert_eq!(
+            search("linux", vars, &files, &[]),
+            vec![
+                found(BrowserKind::Chrome, "/usr/bin/google-chrome-stable"),
+                found(BrowserKind::Brave, "/usr/local/bin/brave"),
+                found(BrowserKind::Chromium, "/snap/bin/chromium"),
+            ],
+            "the first PATH dir wins, whichever name"
+        );
+        assert_eq!(search("linux", vec![], &files, &[]), vec![]);
+        assert_eq!(BrowserKind::parse("Chromium"), Some(BrowserKind::Chromium));
         assert_eq!(BrowserKind::parse("custom"), None);
+        assert!(BrowserKind::Edge.searched("linux").contains("microsoft-edge-stable"));
     }
 
     #[test]
@@ -500,13 +711,13 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Read-only against this machine: `cargo test -- --ignored this_machine`.
+    /// Read-only against this machine: `cargo test -- --ignored this_machine --nocapture`.
     #[test]
     #[ignore]
     fn this_machine_codex_status_and_browsers() {
         println!("codex program: {:?}", codex_program().0);
         println!("codex status: {:?}", codex_status());
-        println!("installed: {:?}", installed_browsers(std::env::consts::OS, Path::exists));
+        println!("found browsers: {:#?}", search_this_machine(None));
         println!("settings file: {:?}", settings_path());
     }
 }

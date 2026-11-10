@@ -5,7 +5,7 @@
 | Tool | Why |
 |---|---|
 | Rust, from [rustup](https://rustup.rs) | Builds Bilinkers. `rust-toolchain.toml` selects Rust 1.99.1, which Rune needs. |
-| Chrome, Brave, or Edge | The browser that Bilinkers drives. |
+| Chrome, Brave, Edge, or Chromium | The browser that Bilinkers drives. It searches your computer for them. |
 | [Codex CLI](https://github.com/openai/codex), signed in with `codex login` | Answers the questions that need an LLM. It uses your ChatGPT sign-in, so no API key is stored. Only `iframe` fill-in-blank questions and `final-test` need it. |
 
 ## Quick start
@@ -61,8 +61,8 @@ Set these in the environment or in `.env`. Bilinkers reads the environment first
 
 | Variable | Meaning | Default |
 |---|---|---|
-| `BROWSER` | `chrome`, `brave`, or `edge` | `chrome` |
-| `BROWSER_BINARY_PATH` | Path to the browser executable, when it is not in the default location | Empty |
+| `BROWSER` | `chrome`, `brave`, `edge`, or `chromium` | `chrome` |
+| `BROWSER_BINARY_PATH` | Path to the browser executable, when the search does not find it | Empty |
 | `CDP_PORT` | Remote debugging port | `9222` |
 | `CODEX_MODEL` | Model for `codex exec` | Empty, which uses the Codex CLI default |
 | `MAX_ANSWER_RETRIES` | Retries for each LLM-answered question | `25` |
@@ -89,7 +89,7 @@ cargo run --release -- [--no-ui] [mode] [url]
 |---|---|
 | `src/bin/` | The command-line entry point and argument parsing |
 | `src/session.rs` | Run modes, browser launch, and the run thread that the terminal and the window share |
-| `src/setup.rs` | The Codex sign-in check, installed browser detection, and the settings file |
+| `src/setup.rs` | The Codex sign-in check, the installed browser search, and the settings file |
 | `src/browser.rs`, `src/frame.rs` | The CDP connection to the LMS tab and script evaluation inside the activity iframe |
 | `src/detect.rs` | Detects which mode fits the open page |
 | `src/runners/` | One runner per mode |

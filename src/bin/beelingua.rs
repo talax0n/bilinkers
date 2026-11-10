@@ -174,7 +174,7 @@ async fn prepare(mode: Mode, env: &HashMap<String, String>, port: u16) -> Option
 #[cfg(feature = "ui")]
 mod window {
     use std::collections::HashMap;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::process::Child;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -184,7 +184,7 @@ mod window {
         ensure_browser, BrowserSetup, Connection, RunHandle, RunMode, Sighting, Watcher, STOPPED,
     };
     use beelingua::setup::{
-        codex_status, installed_browsers, save_settings, spawn_codex_login, BrowserPick, CodexStatus, EnvLayers,
+        codex_status, save_settings, search_this_machine, spawn_codex_login, BrowserPick, CodexStatus, EnvLayers,
     };
     use beelingua::ui::{BrowserStep, Host, StartInfo};
 
@@ -217,7 +217,7 @@ mod window {
     }
 
     fn browser_step(layers: &EnvLayers) -> BrowserStep {
-        let installed = installed_browsers(std::env::consts::OS, Path::exists);
+        let installed = search_this_machine(None);
         BrowserStep::new(installed, BrowserSetup::from_env(&layers.merged()), layers.browser_locked_by())
     }
 

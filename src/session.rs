@@ -19,7 +19,7 @@ use crate::detect::{classify_page, detect_mode, PageKind, PageMode};
 use crate::logger;
 use crate::runners::course::{self, CourseOptions};
 use crate::runners::{checkpoint, exercise, final_test_runner, iframe, reading, unit, Live, Report};
-use crate::setup::BrowserKind;
+use crate::setup::{search_this_machine, BrowserKind};
 
 /// Exit code 130, as for Ctrl-C, when a run is stopped before it ends.
 pub const STOPPED: i32 = 130;
@@ -113,7 +113,7 @@ impl BrowserSetup {
     }
 }
 
-/// cli.js resolveBinaryPath: BROWSER_BINARY_PATH (or CHROME_BINARY_PATH), else the platform default.
+/// cli.js resolveBinaryPath: BROWSER_BINARY_PATH (or CHROME_BINARY_PATH), else where the search finds BROWSER.
 pub fn resolve_binary_path(env: &HashMap<String, String>) -> Result<String, String> {
     let explicit = env.get("BROWSER_BINARY_PATH").or_else(|| env.get("CHROME_BINARY_PATH")).filter(|p| !p.is_empty());
     if let Some(path) = explicit {
@@ -126,17 +126,19 @@ pub fn resolve_binary_path(env: &HashMap<String, String>) -> Result<String, Stri
     }
     let browser = env.get("BROWSER").filter(|b| !b.is_empty()).map_or("chrome".to_string(), |b| b.to_lowercase());
     let os = std::env::consts::OS;
-    let Some(default) = BrowserKind::parse(&browser).and_then(|kind| kind.default_path(os)) else {
+    let Some(kind) = BrowserKind::parse(&browser) else {
         return Err(format!(
-            "No default binary path known for BROWSER={browser} on {os}. Set BROWSER_BINARY_PATH in .env."
+            "BROWSER={browser} is not a browser the bot knows (chrome/brave/edge/chromium). Set BROWSER_BINARY_PATH in .env."
         ));
     };
-    if !Path::new(default).exists() {
-        return Err(format!(
-            "BROWSER={browser} defaults to \"{default}\", but it's not installed there. Set BROWSER to a browser you have (chrome/brave/edge) or BROWSER_BINARY_PATH to its location."
-        ));
+    match search_this_machine(Some(kind)).pop() {
+        Some(found) => Ok(found.path.display().to_string()),
+        None => Err(format!(
+            "BROWSER={browser}: searched {} and did not find {}. Set BROWSER to a browser you have (chrome/brave/edge/chromium) or BROWSER_BINARY_PATH to its location.",
+            kind.searched(os),
+            kind.label()
+        )),
     }
-    Ok(default.to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
