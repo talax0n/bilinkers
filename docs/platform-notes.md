@@ -136,7 +136,7 @@ Page parts:
 - The submit click occasionally does not register with the app's grading. Every LTI type clicks `#quiz-submit-btn` a second time 2.5 s before its deadline.
 - A "Question N of M" counter sits in `#content`. It is sometimes stale. On a fillInBlank activity, Continue advanced the hash and the sentence, but the counter stayed frozen. Progress is detected by any change in the full `#content` innerText. (src/runners/iframe.js, readActivityState)
 - The final slide reads "You can now close this activity and continue to the next one". It has no `#/n` link and no quiz markers, so it matches no handler. That is the normal end.
-- The SPA hash router uses `#/question-N`. It accepts direct navigation regardless of what is unlocked. After a wrong answer the Check-once UI keeps Continue hidden, and the hash was the only way forward. `goToNextQuestionByHash` implements this but is not called. (src/runners/iframe.js)
+- The SPA hash router uses `#/question-N`. It accepts direct navigation regardless of what is unlocked. After a wrong answer the Check-once UI keeps Continue hidden, and the hash was the only way forward. The bot does not use it; it stops on a still-wrong answer instead. (src/runners/iframe.js)
 
 Runner flow (src/runners/iframe.js, main):
 

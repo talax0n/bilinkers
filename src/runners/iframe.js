@@ -63,20 +63,6 @@ async function waitForActivityChange(driver, previous, timeoutMs = 60000) {
   return null;
 }
 
-// Not called. The SPA hash router accepts #/question-N even when a wrong answer hides Continue.
-async function goToNextQuestionByHash(driver) {
-  const currentUrl = await driver.executeScript('return window.location.href');
-  const match = currentUrl.match(/#\/question-(\d+)/);
-  if (!match) return false;
-
-  const next = parseInt(match[1], 10) + 1;
-  await driver.executeScript(`window.location.hash = '#/question-${next}';`);
-  await driver.sleep(1000);
-
-  const newUrl = await driver.executeScript('return window.location.href');
-  return newUrl.includes(`#/question-${next}`);
-}
-
 async function advance(driver, previousState, timeoutMs = 60000) {
   const advanced = await clickContinue(driver);
   if (advanced) return Boolean(await waitForActivityChange(driver, previousState, timeoutMs));
