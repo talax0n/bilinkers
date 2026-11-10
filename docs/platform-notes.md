@@ -2,29 +2,24 @@
 
 What the bot knows about lms.binus.ac.id and the Beelingua course pages. Most facts were verified against the live site. The source file that implements each fact is named in parentheses.
 
-## Browser attach and chromedriver
+## Browser attach
 
-- `src/cli.js` launches the browser with `--remote-debugging-port=9222` and the start URL (default `https://lms.binus.ac.id`). The user logs in, opens the page, and presses Enter. (src/cli.js, main)
-- The bot attaches over CDP to `localhost:9222`. It switches through the window handles and uses the first one whose URL contains `lms.binus.ac.id`. With several LMS tabs open, the first one found wins. (src/browser.js, attachToLms)
-- CDP attach works only with Chromium browsers (Chrome, Brave, Edge). Firefox and Safari do not implement it.
-- `CHROMEDRIVER_PATH` overrides chromedriver auto-detection. (src/browser.js, attachToLms)
-- The latest stable chromedriver that selenium-manager picks by default often does not match the attached browser. Brave reports its own version, not the Chromium version underneath. Plain Chrome that has not updated can fall behind the latest chromedriver. (src/chromedriver.js)
-- chromedriver only needs the same major version as the browser. The bot reads `http://localhost:9222/json/version`, takes the `Browser` field, and extracts the major version with `/(\d+)\./`. (src/chromedriver.js, fetchBrowserMajorVersion)
-- It first looks in the selenium cache at `$SE_CACHE_PATH` or `~/.cache/selenium`, under `chromedriver/<win64|mac-arm64|mac-x64|linux64>/<major>.*/chromedriver`. (src/chromedriver.js, findCachedDriver)
-- If none is cached it runs the bundled selenium-manager with `--browser chrome --browser-version <major> --output json` (60 s timeout) and uses `result.driver_path`. (src/chromedriver.js, downloadMatchingDriver)
+- The binary launches the browser with `--remote-debugging-port=9222` and the start URL (default `https://lms.binus.ac.id`) unless the debug port already answers. The user logs in, opens the page, and presses Enter. (src/bin/beelingua.rs)
+- The bot talks CDP directly through chromiumoxide, so no chromedriver is needed. It uses the first tab whose URL contains `lms.binus.ac.id` and brings it to front. Pointer clicks hang in a background tab. (src/browser.rs, attach_to_lms)
+- The DevTools HTTP endpoint only answers HTTP/1.1 probes. (src/bin/beelingua.rs)
+- The activity iframe is cross-origin, so it is its own CDP target. The bot attaches to it by the iframe's frame id (which is its target id) and looks it up fresh on every call, so a reloaded iframe is picked up. It reattaches only when the connection drops, never when a script throws, so a click never runs twice. (src/frame.rs)
+- CDP attach works only with Chromium browsers (Chrome, Brave, Edge).
 
-Terminal output:
+Window:
 
-- The live OpenTUI dashboard runs only when stdout is a TTY and `NO_TUI` is unset. Piped or CI output keeps JSON lines. (src/cli.js, main)
-- While the dashboard runs, JSON lines would corrupt its UI, so the logger sends every line to the dashboard instead of stdout. (src/logger.js, setSink)
-- `@opentui/core` resolves to an async ESM module under Bun. CommonJS `require()` cannot load it, so it is loaded with a dynamic `import()`. (src/dashboard.js)
-- Every text element has an explicit dark background (`#1d2021`) and light foreground. Without them the text inherited the terminal defaults and was invisible on light themes. (src/dashboard.js)
+- The Rune dashboard opens when stdout is a terminal, a display is available, and neither `--no-ui` nor `NO_TUI` is set. Otherwise events print as JSON lines. (src/ui.rs)
+- The logger sink only does a non-blocking channel send and wakes the window, so the bot never waits on the UI. (src/ui.rs, src/logger.rs)
 
 ## Page detection
 
 The app chrome (header, nav icons, XP badge, the unit row list) is built from the same MUI components on every page. Generic markers such as `MuiButtonBase` or `.bl-w-full` match every page, including the unit list, so they are not used. Only specific markers count, checked from most to least unambiguous.
 
-Order in `src/cli.js` (detectMode):
+Order in `src/detect.rs` (detectMode):
 
 1. An iframe is present and its document contains `quiz-input-sa`, `quiz-input-radio`, `quiz-matching`, or `href="#/n"`. Mode `iframe`. The LTI (Bits) player only ever appears inside an iframe.
 2. The iframe document contains `bl-w-full justify-content-start`. Mode `reading`. The reading BlExercise (passage plus numbered 1..N tiles, lettered option buttons) is also iframe-embedded but uses the MUI option buttons, not the Bits `quiz-input-*` markup.
@@ -34,9 +29,9 @@ Order in `src/cli.js` (detectMode):
 6. The top-level document contains `bl-w-full justify-content-start` (the lettered option buttons). Mode `exercise`.
 7. Two or more `button.bl-w-full` elements contain a `.bl-text-ellipsis` title. Mode `unit`. Verified against the "Unit 2" activity list, which has exactly this shape, no iframe and no lettered options.
 
-Grouped reading layout: at least two distinct numeric `.bl-button__container` pills, and at least two visible `button.bl-w-full.justify-content-start` buttons whose text starts with "A" (two or more option groups on screen). (src/groupedReading.js)
+Grouped reading layout: at least two distinct numeric `.bl-button__container` pills, and at least two visible `button.bl-w-full.justify-content-start` buttons whose text starts with "A" (two or more option groups on screen). (src/grouped_reading.rs)
 
-Inside a unit, after a row is opened and its gate passed, `src/runners/unit.js` (detectMode) decides the runner:
+Inside a unit, after a row is opened and its gate passed, `src/runners/unit.rs` (detectMode) decides the runner:
 
 - It polls for 8 s every 200 ms and checks the iframe and the top-level markup on every tick. A native exercise never has an iframe, so waiting for the iframe first used to burn the whole timeout.
 - An iframe whose document contains `bl-w-full justify-content-start` is `reading`. Any other iframe is `iframe`.
@@ -46,20 +41,20 @@ Inside a unit, after a row is opened and its gate passed, `src/runners/unit.js` 
 
 ## Island map (Beelingua home)
 
-- `https://lms.binus.ac.id/beelingua` shows the eight courses B1.1 to C2.2 as `.hoverable-pointer` nodes. Whitespace-stripped labels match `^[BC]\d\.\d$`. (src/cli.js, detectMode has no mode for this page.)
-- A JS `click()` on a node does nothing (verified 2026-11-10). A Selenium Actions pointer click (move to the element, then click) opens a side panel instead of navigating.
+- `https://lms.binus.ac.id/beelingua` shows the eight courses B1.1 to C2.2 as `.hoverable-pointer` nodes. Whitespace-stripped labels match `^[BC]\d\.\d$`. (src/detect.rs, detectMode has no mode for this page.)
+- A JS `click()` on a node does nothing (verified 2026-11-10). A real pointer click (CDP mouse events at the element's center) opens a side panel instead of navigating.
 - The panel contains the heading `ENG-<label>`. A **View Unit List** button means the course is unfinished. Only **View Course Detail** means it is complete. Either button navigates to that course's roadmap at `/beelingua/student/class/<id>`.
 - An open panel can cover other nodes. Reload the home page before opening the next one.
 
 ## Course roadmap
 
 - The roadmap is an isometric city map. A zig-zag road of hexagon nodes ("Unit 1", "Unit 2", "Checkpoint 1", "Unit 3", ...) with a header readout like "Unit 4/8  CP 1/3  FT 0/1". Its URL has no `/session/{id}` suffix.
-- Each node is a rasterized PNG inside a `.hoverable-pointer` div, with the label as a sibling text node ("Unit8", "Checkpoint3" once whitespace is removed). Colour, lock state and checkmark are baked into the image. No class or attribute shows state. (src/runners/course.js, readCourseNodes)
-- Progress comes from the header instead. `Unit\s*(\d+)\s*/\s*(\d+)` and `CP\s*(\d+)\s*/\s*(\d+)` on `document.body.innerText` give done and total counts. (src/runners/course.js, readProgress)
+- Each node is a rasterized PNG inside a `.hoverable-pointer` div, with the label as a sibling text node ("Unit8", "Checkpoint3" once whitespace is removed). Colour, lock state and checkmark are baked into the image. No class or attribute shows state. (src/runners/course.rs, readCourseNodes)
+- Progress comes from the header instead. `Unit\s*(\d+)\s*/\s*(\d+)` and `CP\s*(\d+)\s*/\s*(\d+)` on `document.body.innerText` give done and total counts. (src/runners/course.rs, readProgress)
 - Course order is fixed. Sorting nodes by the `style.top` of their first descendant with `top` in its style, descending, gives course order. Verified live order: Unit1, Unit2, Checkpoint1, Unit3, Unit4, Checkpoint2, Unit5, Unit6, Checkpoint3, Unit7, Unit8. This matches the visual order and the header counts.
 - The next node is the first in order whose number is greater than the done count for its type and that has not been tried in this run.
 - Labels are whitelisted. Only `Unit N` and `Checkpoint N` are recognised, so the Final Test node is never opened, whatever its label.
-- Nodes are opened with a JS `click()` on the `.hoverable-pointer` element. (src/runners/course.js, clickNode)
+- Nodes are opened with a JS `click()` on the `.hoverable-pointer` element. (src/runners/course.rs, clickNode)
 - Clicking a locked node never changes the URL (verified live). The runner waits 10 s for a URL change and stops if none comes. This also covers a click that lands on road or decoration. The platform's lock rules win over what the header counters imply.
 - Right after navigating back, the roadmap is still loading. A fixed 1500 ms sleep was not always enough (a read found 0 nodes and null progress, then read fine moments later). Nodes and progress are polled together for up to 5 s every 300 ms.
 - After a node opens the runner sleeps 1500 ms, runs the unit or checkpoint runner, then returns with `driver.get(courseUrl)` and another 1500 ms sleep.
@@ -68,16 +63,16 @@ Inside a unit, after a row is opened and its gate passed, `src/runners/unit.js` 
 ## Unit activity list
 
 - The unit page is a stack of rows: video, notes (Bee Notes), Interactive Vocabulary or Grammar Activity, Multiple Choice Grammar Activity, Listening, Reading. Each is locked, in progress, or done. Its URL has no `/content/{id}` suffix.
-- Each row is a `button.bl-w-full` MUI button with no href (React onClick). The title is in `.bl-text-ellipsis`. (src/runners/unit.js, readRows)
+- Each row is a `button.bl-w-full` MUI button with no href (React onClick). The title is in `.bl-text-ellipsis`. (src/runners/unit.rs, readRows)
 - A locked row has both the `disabled` attribute and the `Mui-disabled` class. Verified on "Unit 2", where Reading, Listening and others stay locked until the row above is complete.
 - A completed row always shows the same checkmark SVG, matched by its path data `M14.2021 1.52344L5.45215 10.273L1.07715 5.89844`. Verified on a done "Interactive Vocabulary Activity" row.
-- A JS `click()` on a row sometimes does not trigger navigation. The row is scrolled to the center, then clicked with a Selenium Actions pointer click after 200 ms. (src/runners/unit.js, clickRow)
-- Titles are compared with `textContent.trim()`, not Selenium `getText()`. `getText()` normalizes whitespace (it collapses the non-breaking space some titles contain), so it never matched the title `readRows` returned.
+- A JS `click()` on a row sometimes does not trigger navigation. The row is scrolled to the center, then clicked with a real pointer click after 200 ms. (src/runners/unit.rs, clickRow)
+- Titles are compared with `textContent.trim()`, never rendered text. Rendered text normalizes whitespace (it collapses the non-breaking space some titles contain), so it never matched the title `readRows` returned.
 - After the click the runner waits 10 s for the URL to change.
 - Rows already opened in this run are not picked again. A row that cannot be auto-completed would otherwise loop forever.
 - The run stops when an activity runner returns `unhandled` or `incorrect`.
 
-Start gate (src/runners/unit.js, clickStartGate):
+Start gate (src/runners/unit.rs, clickStartGate):
 
 - Native and iframe activities both open behind a top-level "Exercise" gate first. URL suffix `/BlExercise?status=0`, Total Question and Passing Score, Cancel and Start buttons, no iframe yet. Verified on "Interactive Grammar Activity". The real content loads only after the click.
 - With a prior attempt on record the button reads "Continue" instead of "Start" (verified on a second visit). Both are accepted.
@@ -85,13 +80,13 @@ Start gate (src/runners/unit.js, clickStartGate):
 - Not every activity has a gate. Not finding one is not an error.
 - After the gate click the runner sleeps 1500 ms.
 
-"Reading" rows (src/runners/unit.js, main):
+"Reading" rows (src/runners/unit.rs, main):
 
 - A Reading row can mix plain questions with an "Original vs Paraphrased Text" cluster that renders several questions' option groups at once (verified: 5 groups of 5 buttons, told apart only by scroll position, several enabled at once).
-- DOM sniffing sometimes calls such a page `exercise`. The native exercise's option click (`querySelectorAll(...).find(startsWith(letter))` in src/questionTypes/_optionButtons.js) then hits the first matching group in DOM order, not the current one, and burns every retry as incorrect.
+- DOM sniffing sometimes calls such a page `exercise`. The native exercise's option click (`querySelectorAll(...).find(startsWith(letter))` in src/question_types/option_buttons.rs) then hits the first matching group in DOM order, not the current one, and burns every retry as incorrect.
 - The reading runner scopes clicks per group and handles plain questions too, so the row title "Reading" picks it directly.
 
-Videos and notes (src/runners/unit.js, completeMediaActivity):
+Videos and notes (src/runners/unit.rs, completeMediaActivity):
 
 - Video and notes rows have no gate and no questions. They complete by being viewed.
 - Every `<video>` on the page is muted and played. Top-level videos are tried first, then each iframe.
@@ -105,16 +100,16 @@ Videos and notes (src/runners/unit.js, completeMediaActivity):
 
 ## Native exercise
 
-- Option buttons are `button.bl-w-full.justify-content-start` (`MuiButtonBase-root bl-w-full justify-content-start ...`). Option text is the `bl-rtf undefined` element inside each button, up to `</p></div>`. Letters A to F follow DOM order. (src/questionTypes/_optionButtons.js, parseOptions)
+- Option buttons are `button.bl-w-full.justify-content-start` (`MuiButtonBase-root bl-w-full justify-content-start ...`). Option text is the `bl-rtf undefined` element inside each button, up to `</p></div>`. Letters A to F follow DOM order. (src/question_types/option_buttons.rs, parseOptions)
 - The question text is the first `bl-rtf undefined` block on the page, up to `</p></div>`.
-- An option is chosen by clicking the button whose text starts with its letter, then the button with text "Check". (src/questionTypes/_optionButtons.js, selectOptionAndCheck)
+- An option is chosen by clicking the button whose text starts with its letter, then the button with text "Check". (src/question_types/option_buttons.rs, selectOptionAndCheck)
 - Feedback is an `h5` reading "Correct!" or "Incorrect!", polled for 5 s every 200 ms. A wrong answer can be retried in place.
-- An incorrect answer comes with a specific hint in `heading.parentElement.nextElementSibling`. Example on a True/False/Not-Given reading question: "Revisit the passage to determine if Jenna's role in organizing the pantry was mentioned." It is passed to the retry. (src/questionTypes/_optionButtons.js, waitForCheckFeedback)
-- The exercise runner uses no LLM. It tries each option in order until Check says correct (`retryLimit` is options minus one). Listening questions cannot be heard, and with in-place Check feedback, exhausting A to D is cheaper and more reliable than asking a model. (src/runners/exercise.js, tryEachOption)
-- Native exercises never render an iframe, so the DOM read uses a 300 ms iframe wait instead of the 30 s LTI default. (src/runners/exercise.js, main)
-- Advancing: a top-level button with text "Next" (src/browser.js, goToNextQuestion). If there is none, the pill numbered `questionNum + 1`. If neither exists, the exercise is finished.
+- An incorrect answer comes with a specific hint in `heading.parentElement.nextElementSibling`. Example on a True/False/Not-Given reading question: "Revisit the passage to determine if Jenna's role in organizing the pantry was mentioned." It is passed to the retry. (src/question_types/option_buttons.rs, waitForCheckFeedback)
+- The exercise runner uses no LLM. It tries each option in order until Check says correct (`retryLimit` is options minus one). Listening questions cannot be heard, and with in-place Check feedback, exhausting A to D is cheaper and more reliable than asking a model. (src/runners/exercise.rs, tryEachOption)
+- Native exercises never render an iframe, so the DOM read uses a 300 ms iframe wait instead of the 30 s LTI default. (src/runners/exercise.rs, main)
+- Advancing: a top-level button with text "Next" (src/browser.rs, goToNextQuestion). If there is none, the pill numbered `questionNum + 1`. If neither exists, the exercise is finished.
 
-Numbered-pill exercises (src/runners/exercise.js, submitIfPresent):
+Numbered-pill exercises (src/runners/exercise.rs, submitIfPresent):
 
 - Some exercises, for example "Multiple Choice Grammar Activity" (15 questions, pills 1..15 across the top), have no per-question "Next" button. Moving on means clicking the next pill.
 - They need an explicit final "Submit" after the last question. Without it every answer can be correct and the exercise still shows as unfinished.
@@ -125,7 +120,7 @@ Numbered-pill exercises (src/runners/exercise.js, submitIfPresent):
 
 ## LTI iframe player
 
-Loading (src/browser.js, getCurrentQuestionDom):
+Loading (src/browser.rs, getCurrentQuestionDom):
 
 - The LTI player injects its content iframe with JS after load. The DOM read polls for an iframe for up to 30 s every 200 ms and uses the first one.
 - Opening an activity first shows an "LTI launcher" page inside that iframe, a hidden auto-submitting form with id `ltiForm` that POSTs to the Bits player.
@@ -136,16 +131,16 @@ Loading (src/browser.js, getCurrentQuestionDom):
 
 Page parts:
 
-- Author instructions (task, tense or rule notes, worked examples) are always styled `color:rgb(26, 106, 132)` (a teal) in the Bits editor, whatever the question type or wording. They are extracted by that style instead of by phrases, with tags, `&nbsp;` and zero-width spaces stripped. (src/questionTypes/_ltiQuiz.js, extractInstructionText)
+- Author instructions (task, tense or rule notes, worked examples) are always styled `color:rgb(26, 106, 132)` (a teal) in the Bits editor, whatever the question type or wording. They are extracted by that style instead of by phrases, with tags, `&nbsp;` and zero-width spaces stripped. (src/question_types/lti_quiz.rs, extractInstructionText)
 - Answers are submitted with `#quiz-submit-btn` ("Check My Answer").
 - `.quiz-next-btn` is the post-answer "Continue" link. It is visible (`display` not `none`) only once a question passes. Its visibility is the trusted "correct" signal.
-- The generic `.correct.timeout` and `.incorrect.timeout` banners (src/questionTypes/_ltiQuiz.js, waitForQuizFeedback) do not reliably reflect the result for the `sa`, matching or radio quiz types. See [Question types](#question-types).
+- The generic `.correct.timeout` and `.incorrect.timeout` banners (src/question_types/lti_quiz.rs, waitForQuizFeedback) do not reliably reflect the result for the `sa`, matching or radio quiz types. See [Question types](#question-types).
 - The submit click occasionally does not register with the app's grading. Every LTI type clicks `#quiz-submit-btn` a second time 2.5 s before its deadline.
-- A "Question N of M" counter sits in `#content`. It is sometimes stale. On a fillInBlank activity, Continue advanced the hash and the sentence, but the counter stayed frozen. Progress is detected by any change in the full `#content` innerText. (src/runners/iframe.js, readActivityState)
+- A "Question N of M" counter sits in `#content`. It is sometimes stale. On a fillInBlank activity, Continue advanced the hash and the sentence, but the counter stayed frozen. Progress is detected by any change in the full `#content` innerText. (src/runners/iframe.rs, readActivityState)
 - The final slide reads "You can now close this activity and continue to the next one". It has no `#/n` link and no quiz markers, so it matches no handler. That is the normal end.
-- The SPA hash router uses `#/question-N`. It accepts direct navigation regardless of what is unlocked. After a wrong answer the Check-once UI keeps Continue hidden, and the hash was the only way forward. The bot does not use it; it stops on a still-wrong answer instead. (src/runners/iframe.js)
+- The SPA hash router uses `#/question-N`. It accepts direct navigation regardless of what is unlocked. After a wrong answer the Check-once UI keeps Continue hidden, and the hash was the only way forward. The bot does not use it; it stops on a still-wrong answer instead. (src/runners/iframe.rs)
 
-Runner flow (src/runners/iframe.js, main):
+Runner flow (src/runners/iframe.rs, main):
 
 - Handler order is fillInBlank, errorAnalysis, quizMatching, vocabularyIntro. `registry.findHandler()` returns the first match.
 - Strategy per type: fillInBlank uses the LLM, errorAnalysis tries letter combinations, quizMatching reads the answer from the page, vocabularyIntro clicks through.
@@ -158,7 +153,7 @@ Runner flow (src/runners/iframe.js, main):
 
 ## Grouped reading exercise
 
-- Layout: numbered 1..N tile pills (`.bl-button__container`), the passage on the left, option-button sub-questions on the right. Verified on "ENG-B2.2 Unit 1" (15 questions, mixed reading comprehension, true/false/not-given and paraphrase items). (src/runners/reading.js)
+- Layout: numbered 1..N tile pills (`.bl-button__container`), the passage on the left, option-button sub-questions on the right. Verified on "ENG-B2.2 Unit 1" (15 questions, mixed reading comprehension, true/false/not-given and paraphrase items). (src/runners/reading.rs)
 - Solved by brute force with no LLM.
 - A wrong answer re-enables its options. A correct answer locks them (all disabled). So each question is cycled A, B, C, D until it sticks, and "all options locked" can only mean correct.
 - Each tile's background colour is the per-question verdict, updated when a Check or a pill transition grades the answer. It works for every item type.
@@ -167,20 +162,20 @@ Runner flow (src/runners/iframe.js, main):
   - unanswered: `rgb(127, 202, 212)` (solid teal)
   - current: solid orange
 - The runner does not read these colours today. It reads option `disabled` state.
-- Options are one flat list of visible `button.bl-w-full.justify-content-start`. A new group starts each time a button's letter is "A". (src/runners/reading.js, answerOpenGroups)
+- Options are one flat list of visible `button.bl-w-full.justify-content-start`. A new group starts each time a button's letter is "A". (src/runners/reading.rs, answerOpenGroups)
 - Tried letters are remembered per group, keyed by pill number, group index and the first 60 characters of the group's first option. The key survives navigation within a run and does not collide on repeated option text.
 - After a pill click the runner waits 800 ms. A pill with no enabled options is already correct.
-- Some questions have a per-question button matching `/^Check( My Answer)?$/i`. Those grade in place. The runner picks a letter, waits 400 ms, clicks Check, waits 1400 ms, and reads an `h1` to `h6` reading "Correct!" or "Incorrect!". "Incorrect!" leaves the options enabled, so it moves to the next letter (A to F). (src/runners/reading.js, answerCheckQuestion)
+- Some questions have a per-question button matching `/^Check( My Answer)?$/i`. Those grade in place. The runner picks a letter, waits 400 ms, clicks Check, waits 1400 ms, and reads an `h1` to `h6` reading "Correct!" or "Incorrect!". "Incorrect!" leaves the options enabled, so it moves to the next letter (A to F). (src/runners/reading.rs, answerCheckQuestion)
 - Questions without Check are graded by leaving them. The runner clicks the next pill (then waits 1000 ms) and sees the lock on a later pass.
-- Submit is gated. Clicking Submit (then 1200 ms) shows "All answers must be correct" while any item is wrong. The runner then clicks "Close" (600 ms) and keeps fixing. (src/runners/reading.js, trySubmit)
+- Submit is gated. Clicking Submit (then 1200 ms) shows "All answers must be correct" while any item is wrong. The runner then clicks "Close" (600 ms) and keeps fixing. (src/runners/reading.rs, trySubmit)
 - With everything correct, Submit opens an "Are you sure?" confirm. Clicking the visible "Yes" (then 3000 ms) records the attempt. With neither the guard nor Yes, the runner clicks Close and treats it as not done.
 - The result screen shows "You Passed! Your Score: 100" and a "Next" button back to the unit list. The runner polls 8 s every 300 ms, reading the score and clicking Next.
 - Passes are capped at 12. A pass that answered nothing while Submit still refuses means a locked item is wrong, which breaks the re-enable assumption, so the run stops as `stuck`.
-- The runner reads the DOM with a 300 ms iframe wait. `src/cli.js` and `src/runners/unit.js` find this layout both inside an iframe and at top level. The source comment called it a native MUI exercise with no iframe.
+- The runner reads the DOM with a 300 ms iframe wait. `src/detect.rs` and `src/runners/unit.rs` find this layout both inside an iframe and at top level. The source comment called it a native MUI exercise with no iframe.
 
 ## Checkpoint
 
-Gate and attempts (src/runners/checkpoint.js):
+Gate and attempts (src/runners/checkpoint.rs):
 
 - Gate example: "ENG-B1.2 ... Checkpoint 1", Total Question 30, Passing Score 100, Maximum Attempt Unlimited.
 - The gate button reads "Start Attempt 1" on a fresh checkpoint, "Start Attempt N" later, or "Continue" when an attempt is in progress (verified live). Matched by prefix `Start Attempt` or exact `Continue`, polled for 8 s every 300 ms. Then the runner sleeps 1500 ms. (clickGateButton)
@@ -231,8 +226,8 @@ Passed checkpoint gate (verified live 2026-11-10, C2.2 Checkpoint 1):
 
 ## Final test
 
-- A Final Test attempt has 50 questions and exactly 1 attempt, with a passing score of 66. It uses the same pill-nav native quiz DOM as a checkpoint. Option rows are `button.bl-w-full.justify-content-start`. (src/runners/final-test.js)
-- Pill helpers (`readPills`, `clickPill`, `ensurePillsExpanded`, `clickSaveButton`, `waitForPillSaved`) are shared with src/runners/checkpoint.js.
+- A Final Test attempt has 50 questions and exactly 1 attempt, with a passing score of 66. It uses the same pill-nav native quiz DOM as a checkpoint. Option rows are `button.bl-w-full.justify-content-start`. (src/runners/final_test_runner.rs)
+- Pill helpers (`readPills`, `clickPill`, `ensurePillsExpanded`, `clickSaveButton`, `waitForPillSaved`) are shared with src/runners/checkpoint.rs.
 - The pill nav re-collapses to a default view of about 12 pills after landing on some questions (seen after Q11 and Q12). Expanding once before the loop is not enough, so it re-expands before every click attempt.
 - A failed pill click used to be ignored. The run then re-read the same question for every later pill with no error. Each pill click is tried up to 3 times, then the run stops as `stuck`. (scrapeFinalTest)
 - A question still rendering gives different content on two reads spaced apart. A settled one reads the same. Comparing to the previous question's DOM did not work, because outerHTML noise (ids, timestamps) made it differ at once. The runner requires two consecutive reads 300 ms apart to match, for up to 5 s, with a 600 ms iframe wait.
@@ -254,30 +249,30 @@ Each handler exposes `detect`, `parse`, `answer` and `checkResult` (src/question
 
 ### audioMultipleChoice
 
-- Detected by a visible `.MuiSlider-root` audio player plus `bl-w-full justify-content-start` option buttons. (src/questionTypes/audioMultipleChoice.js)
-- A past listening question's `MuiSlider-root` player stays mounted, only hidden, after the SPA moves on. A substring match on outerHTML would keep matching audioMultipleChoice forever after the first listening question. `hasVisibleSlider` counts only sliders with `offsetParent !== null` (not inside a `display:none` subtree). (src/browser.js, getCurrentQuestionDom)
+- Detected by a visible `.MuiSlider-root` audio player plus `bl-w-full justify-content-start` option buttons. (src/question_types/audio_multiple_choice.rs)
+- A past listening question's `MuiSlider-root` player stays mounted, only hidden, after the SPA moves on. A substring match on outerHTML would keep matching audioMultipleChoice forever after the first listening question. `hasVisibleSlider` counts only sliders with `offsetParent !== null` (not inside a `display:none` subtree). (src/browser.rs, getCurrentQuestionDom)
 - Without `hasVisibleSlider` (fixture DOMs with no live visibility) detection falls back to the substring check.
 - The instruction is the first `<strong>` in the first `bl-rtf undefined` block. The question is the next `<p>`.
 - Answered and checked like any native option question. See [Native exercise](#native-exercise).
 
 ### readingComprehension
 
-- Detected by option buttons and no visible slider. A stale hidden slider must not disqualify a real reading question. (src/questionTypes/readingComprehension.js)
+- Detected by option buttons and no visible slider. A stale hidden slider must not disqualify a real reading question. (src/question_types/reading_comprehension.rs)
 - The text is the first `bl-rtf undefined` block with tags stripped.
 - Answered and checked like any native option question, including the hint on "Incorrect!".
 
 ### fillInBlank
 
-- Detected inside the iframe by `quiz-input-sa` (short answer). The blank count is the number of `quiz-input-sa` occurrences. (src/questionTypes/fillInBlank.js)
+- Detected inside the iframe by `quiz-input-sa` (short answer). The blank count is the number of `quiz-input-sa` occurrences. (src/question_types/fill_in_blank.rs)
 - The sentence is the first `p`, `div`, `li` or `td` block whose text has `__` and that contains `<strong>` or `<b>`. Fallback is the first bold chunk with `__`, plus the next bold chunk when it starts with `(` or `[`.
 - Each `.quiz-input-sa` gets its value set, then `input` and `change` events (bubbling). Extra inputs reuse the first answer. Then `#quiz-submit-btn` is clicked after 100 to 200 ms.
 - The `.incorrect` banner is noise for this type. A correct answer ("were rainy", confirmed by Continue going live and the input keeping it) still flashed `.incorrect` for about 2 s, with the same timing as a real wrong answer.
 - Only a visible `.quiz-next-btn` counts as correct. Anything else by the 5 s deadline is `incorrect` (no exception), since this type has no reliable wrong-answer signal. Submit is re-clicked once 2.5 s before the deadline.
-- The on-screen worked example shows the answer inside a full sentence (for example "Answer: ... I will be travelling to Surabaya."). Without a format note the model copied that shape, and an input held "I think he is going to win the race..." instead of "is going to win". The note asks for only the blank words, `{"answers": [...]}` in order for several blanks. (src/runners/iframe.js, FORMAT_NOTES)
+- The on-screen worked example shows the answer inside a full sentence (for example "Answer: ... I will be travelling to Surabaya."). Without a format note the model copied that shape, and an input held "I think he is going to win the race..." instead of "is going to win". The note asks for only the blank words, `{"answers": [...]}` in order for several blanks. (src/runners/iframe.rs, FORMAT_NOTES)
 
 ### errorAnalysis
 
-- Detected inside the iframe by `quiz-input-radio`. (src/questionTypes/errorAnalysis.js)
+- Detected inside the iframe by `quiz-input-radio`. (src/question_types/error_analysis.rs)
 - Candidate words are underlined. Some questions wrap each in `<b><u>..</u></b>`, others use a bare `<u>` (seen on the "Although the intern tried..." A to E question). Bold-wrapped underlines are used when present, else every `<u>`.
 - Candidates are marked inline, for example `...help [D]they[/D] improve...`. A plain word list loses position when a word repeats ("their" in both "their job" and "their skills", only one a candidate).
 - Some templates mark candidates with absolutely positioned overlay labels (`data-options` with `label: A`, one per `.quiz-input-radio`) and no `<u>` at all ("By the time the guests arrived..."). The word cannot be recovered without layout math, but only the letters matter.
@@ -286,11 +281,11 @@ Each handler exposes `detect`, `parse`, `answer` and `checkResult` (src/question
 - `.quiz-input-radio` is not an exclusive radio group. Several checks can show at once. The click script sets exactly the requested letters and unchecks the rest.
 - Right after a fresh activity opens, the radios may not be rendered yet. A throw there skipped the letter for good, because the brute-forcer advances on any failure (a correct A was skipped while B to E were tried). Radios are polled for 8 s every 300 ms.
 - Correct means `.quiz-next-btn` is visible, or no `.quiz-input-radio` is left. The banners are unreliable here too (a correct E, with Continue visible and the radio locked, timed out waiting for them). Anything else by 5 s is `incorrect`, and the next attempt's reload handles the lock. Submit is re-clicked once 2.5 s before the deadline.
-- Solved by brute force, not an LLM. Every non-empty letter subset is tried in increasing size (A, B, ..., A+B, A+C, ...), one per retry. There are only a handful of candidates. A fresh answerer per question keeps the counter from leaking. (src/runners/iframe.js, createBruteForceAnswerer)
+- Solved by brute force, not an LLM. Every non-empty letter subset is tried in increasing size (A, B, ..., A+B, A+C, ...), one per retry. There are only a handful of candidates. A fresh answerer per question keeps the counter from leaking. (src/runners/iframe.rs, createBruteForceAnswerer)
 
 ### quizMatching
 
-- Detected inside the iframe by `quiz-matching`, `dropzone` and `draggable` all present. (src/questionTypes/quizMatching.js)
+- Detected inside the iframe by `quiz-matching`, `dropzone` and `draggable` all present. (src/question_types/quiz_matching.rs)
 - A drag-and-drop word bank. The app's grading (`checkQuizMatching` in app.js) only checks `dropzone.data-filled === dropzone.data-drag-target`. The right draggable for a blank has that index as its `data-drag`. Distractors have indexes that match no blank.
 - Simulated mouse drags did not register with interact.js (the dropzone stayed empty and Check stayed disabled). The handler writes the end state the app's onDrop produces instead. It centers each draggable on its dropzone in `%` units, sets `data-filled`, and removes `disabled` from `#quiz-submit-btn`. The grading code cannot tell the difference.
 - The answer comes from the page, so `retryLimit` is 0.
@@ -299,7 +294,7 @@ Each handler exposes `detect`, `parse`, `answer` and `checkResult` (src/question
 
 ### vocabularyIntro
 
-- Vocabulary presentation pages (word cards, meaning and example cards, instruction screens) sit between quiz pages in the same iframe SPA. They are not graded and have no options. (src/questionTypes/vocabularyIntro.js)
+- Vocabulary presentation pages (word cards, meaning and example cards, instruction screens) sit between quiz pages in the same iframe SPA. They are not graded and have no options. (src/question_types/vocabulary_intro.rs)
 - A right-arrow link with `href="#/n"` walks the slide sequence forward (word card, then meaning/example card, then the next word).
 - The visible "Continue" button on these pages sometimes has a stale href equal to the page's own hash (an authoring template leftover) and never advances. So `a[href="#/n"]` is clicked instead.
 - Quiz pages also carry a `#/n` link. It is their post-answer Continue, hidden with `style="display:none"` until answered. Matching on the href alone skipped real questions. Pages with `quiz-input-radio` or `quiz-input-sa` are excluded.
@@ -308,25 +303,25 @@ Each handler exposes `detect`, `parse`, `answer` and `checkResult` (src/question
 
 ## LLM and the answer loop
 
-- The default provider is `codex`. Each question runs `codex exec --ephemeral --sandbox read-only -o <file> -` with the prompt on stdin, so the call uses the user's own `codex login` (ChatGPT OAuth) and no key is stored. About 8 to 10 s per call. Verified live 2026-11-10 on C2.2 Unit 1 Interactive Grammar Activity (5 of 5 fill-in-blank correct on the first try). (src/llm.js, askCodex)
-Provider calls (src/llm.js):
+- The default provider is `codex`. Each question runs `codex exec --ephemeral --sandbox read-only -o <file> -` with the prompt on stdin, so the call uses the user's own `codex login` (ChatGPT OAuth) and no key is stored. About 8 to 10 s per call. Verified live 2026-11-10 on C2.2 Unit 1 Interactive Grammar Activity (5 of 5 fill-in-blank correct on the first try). (src/llm.rs, askCodex)
+Provider calls (src/llm.rs):
 
 - `LLM_PROVIDER` is `openai` (default, any OpenAI-compatible endpoint via `OPENAI_BASE_URL`) or `gemini`. A Gemini client is detected by having `getGenerativeModel`, since it has no `chat.completions` API.
 - The user prompt is JSON of `{ instruction, questionData, feedback }`. The system prompt asks for strict JSON only, `{ "answer": ... }` or `{ "answers": [...] }`.
 - `response_format: json_object` is not set. One provider returns a 502 for the whole request when it is. JSON is enforced only by the system prompt.
 - Models sometimes wrap the reply in a `` ```json `` fence anyway. It is stripped before parsing.
 
-Transient failures (src/answerLoop.js, callWithRetry):
+Transient failures (src/answer_loop.rs, callWithRetry):
 
 - Each LLM call gets up to 3 tries, 1 to 2 s apart. An OpenAI-compatible proxy intermittently returned 403 with a voucher or billing error, then succeeded on the identical next call seconds later.
 - This is separate from the question-level loop, so a blip does not use up an answer attempt without clicking anything new.
 
-Question loop (src/answerLoop.js, processQuestion):
+Question loop (src/answer_loop.rs, processQuestion):
 
 - The loop runs up to `retryLimit + 1` attempts, 100 to 200 ms apart, and stops at the first `correct`.
 - `checkResult` returns `'correct'`, `'incorrect'`, or `{ outcome, hint }` when the page explains a wrong answer. Any other value is an error.
 - After a wrong answer the feedback is "previous answer was wrong. Hint: <hint>" or "previous answer was wrong, try again.", followed by every answer already tried and confirmed wrong.
 - The tried-answers list exists because some pages show the same static hint whatever wrong option was picked (a True/False/Not-Given question gave the same hint after both "True" and "False"). Each retry is a stateless LLM call with no memory, so without the list the model can repeat a wrong guess.
 - An exception during an attempt counts as an incorrect attempt with feedback "previous attempt failed with an error: <message>".
-- `MAX_ANSWER_RETRIES` sets `config.retry.maxAnswerRetries` (default 25). (src/config.js)
-- Only fillInBlank (src/runners/iframe.js) and the Final Test (src/runners/final-test.js) call the LLM. The native exercise, grouped reading, checkpoint, errorAnalysis and quizMatching are solved without it.
+- `MAX_ANSWER_RETRIES` sets `config.retry.maxAnswerRetries` (default 25). (src/config.rs)
+- Only fillInBlank (src/runners/iframe.rs) and the Final Test (src/runners/final_test_runner.rs) call the LLM. The native exercise, grouped reading, checkpoint, errorAnalysis and quizMatching are solved without it.

@@ -1,10 +1,8 @@
 .superpowers/
-node_modules/
 .env
-progress.json
 logs/
 .sisyphus/
-checkpoint-capture.json
 final-test-answers.md
 final-test-answers.json
-rust/target/
+target/
+checkpoint-capture.json
