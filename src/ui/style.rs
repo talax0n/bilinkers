@@ -174,6 +174,12 @@ pub static BANG: Icon = Icon {
     body: r#"<path d="M8 4.2V8.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="8" cy="11.6" r="1.05" fill="currentColor"/>"#,
 };
 
+pub static LOCK: Icon = Icon {
+    name: "bilinkers-lock",
+    view: 16.0,
+    body: r#"<rect x="3.5" y="7" width="9" height="6.5" rx="1.6" fill="currentColor"/><path d="M5.6 7V5.3a2.4 2.4 0 0 1 4.8 0V7" stroke="currentColor" stroke-width="1.6" fill="none"/>"#,
+};
+
 pub const CREDIT: &str = "Made by TX25-2";
 
 pub fn glyph(i: &'static Icon, size: f32, color: Color) -> El {

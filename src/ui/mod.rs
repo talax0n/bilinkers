@@ -17,7 +17,7 @@ use rune::{App, AppHandle, AppSpec, Chrome, Cx, El, FileDialogOptions, Latest, T
 use crate::logger::{self, Event, Level, Sink};
 use crate::session::{BrowserSetup, Connection, RunMode, Sighting};
 use crate::setup::{browser_executable, BrowserKind, BrowserPick, CodexStatus, FoundBrowser};
-pub use dashboard::{demo_events, Dashboard, DemoEvent, Phase, RunStatus, MAX_LOG_LINES};
+pub use dashboard::{all_courses_events, demo_events, Dashboard, DemoEvent, Phase, RunStatus, MAX_LOG_LINES};
 pub use flow::BrowserStep;
 use flow::{step, Effect, Flow, Input, Screen};
 use style::{button, palette, Kind};
@@ -373,7 +373,11 @@ mod demo {
     }
 
     fn board(events: &[DemoEvent]) -> Dashboard {
-        let mut board = Dashboard::new("Unit");
+        board_for("Unit", events)
+    }
+
+    pub fn board_for(mode: &str, events: &[DemoEvent]) -> Dashboard {
+        let mut board = Dashboard::new(mode);
         for (level, message, fields) in events {
             board.apply(&Event {
                 time: std::time::SystemTime::now(),
@@ -437,6 +441,23 @@ mod demo {
             s.details = true;
         }),
         ("finished", |s| s.flow.screen = Screen::Finished(board(&demo_events()))),
+        ("finished-all-courses", |s| {
+            s.flow.screen = Screen::Finished(board_for(RunMode::Island.label(), &all_courses_events(false)));
+        }),
+        ("finished-all-courses-locked", |s| {
+            s.flow.screen = Screen::Finished(board_for(RunMode::Island.label(), &all_courses_events(true)));
+        }),
+        ("finished-unit-done", |s| {
+            let done = vec![
+                (Level::Info, "No unfinished activities left in this unit — done", vec![("total", json!(6))]),
+                (
+                    Level::Info,
+                    "Run finished",
+                    vec![("status", json!("complete")), ("total", json!(6)), ("mode", json!("unit"))],
+                ),
+            ];
+            s.flow.screen = Screen::Finished(board(&done));
+        }),
         ("stuck", |s| {
             let mut events = demo_events()[..14].to_vec();
             events.push((Level::Warn, "Unhandled question type: stopping", vec![("questionNum", json!(2))]));
@@ -598,6 +619,39 @@ mod tests {
         click(&mut rt, "start");
         frames_until(&mut rt, |s| matches!(s.flow.screen, Screen::Running(_)));
         assert_eq!(shown(&rt, "mode").as_deref(), Some("All courses"));
+    }
+
+    #[test]
+    fn the_all_courses_finished_screen_lists_each_course() {
+        let mut ui = ui(demo::info(), demo::FakeHost::default(), mpsc::channel().1);
+        ui.flow.screen = Screen::Finished(demo::board_for("All courses", &all_courses_events(true)));
+        let mut rt = runtime_sized(ui, false, (945.0, 1025.0));
+        rt.frame(0.0);
+        assert_eq!(shown(&rt, "run-title").as_deref(), Some("All courses finished"));
+        assert_eq!(
+            shown(&rt, "run-text").as_deref(),
+            Some("Nothing left to do on Beelingua. The bot checked B1.1 to C2.2.")
+        );
+        assert_eq!(shown(&rt, "step-1-title").as_deref(), Some("B1.1"));
+        assert_eq!(shown(&rt, "step-1-state").as_deref(), Some("Finished"));
+        assert_eq!(shown(&rt, "step-8-title").as_deref(), Some("C2.2"));
+        assert_eq!(shown(&rt, "step-8-state").as_deref(), Some("Locked"));
+        assert_eq!(shown(&rt, "status-label").as_deref(), Some("All courses complete"));
+        assert!(rt.find("run-again").is_some());
+    }
+
+    #[test]
+    fn a_unit_with_nothing_left_says_so() {
+        let mut ui = ui(demo::info(), demo::FakeHost::default(), mpsc::channel().1);
+        let done = [(Level::Info, "Run finished", vec![("status", json!("complete")), ("mode", json!("unit"))])];
+        ui.flow.screen = Screen::Finished(demo::board_for("Unit", &done));
+        let mut rt = runtime(ui, true);
+        rt.frame(0.0);
+        assert_eq!(shown(&rt, "run-title").as_deref(), Some("This unit is finished"));
+        assert_eq!(
+            shown(&rt, "step-empty-text").as_deref(),
+            Some("Nothing left to do. Everything here was already done.")
+        );
     }
 
     #[test]

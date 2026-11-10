@@ -8,13 +8,17 @@ use rune::{col, el, row, text, Color, Cursor, El, ScrollSpec};
 use serde_json::{json, Value};
 
 use crate::logger::{Event, Level};
+use crate::session::RunMode;
 use crate::ui::style::{
     bar, chip, dot, font, glyph, list_row, live_dot, page, section, space, two_tone, Header, Palette, BANG, CHECK,
-    CHEVRON_DOWN, CHEVRON_RIGHT, CROSS, RETRY,
+    CHEVRON_DOWN, CHEVRON_RIGHT, CROSS, LOCK, RETRY,
 };
 
 /// A logger call to replay: level, message and fields.
 pub type DemoEvent = (Level, &'static str, Vec<(&'static str, Value)>);
+
+/// The island run's status when every course was already done.
+pub const ALL_COURSES_COMPLETE: &str = "all-courses-complete";
 
 /// Matches the JS dashboard's MAX_LOG_LINES.
 pub const MAX_LOG_LINES: usize = 200;
@@ -40,7 +44,7 @@ impl RunStatus {
     }
 
     fn succeeded(&self) -> bool {
-        matches!(self, RunStatus::Finished(s) if s == "complete" || s == "passed")
+        matches!(self, RunStatus::Finished(s) if s == "complete" || s == "passed" || s == ALL_COURSES_COMPLETE)
     }
 }
 
@@ -56,6 +60,8 @@ pub struct LogLine {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepKind {
+    /// A course on the island map, B1.1 to C2.2.
+    Course,
     /// An activity or a course node.
     Activity,
     Question(u64),
@@ -75,6 +81,10 @@ pub enum StepState {
     Stuck,
     /// Still open when the run stopped or failed.
     Stopped,
+    /// A course the island map does not open yet.
+    Locked,
+    /// A course that is not finished and was not opened.
+    Todo,
 }
 
 /// One row of the step list.
@@ -101,6 +111,8 @@ pub struct Dashboard {
     pub steps: Vec<Step>,
     /// The error of "Run failed".
     pub error: Option<String>,
+    /// The `mode` of "Run finished".
+    pub finished_mode: Option<RunMode>,
     pub lines: VecDeque<LogLine>,
     next_id: u64,
 }
@@ -122,6 +134,7 @@ impl Dashboard {
             incorrect: 0,
             steps: Vec::new(),
             error: None,
+            finished_mode: None,
             lines: VecDeque::new(),
             next_id: 0,
         }
@@ -145,6 +158,15 @@ impl Dashboard {
         self.steps.iter().filter(|s| s.kind == StepKind::Activity).count()
     }
 
+    pub fn courses(&self) -> impl Iterator<Item = &Step> {
+        self.steps.iter().filter(|s| s.kind == StepKind::Course)
+    }
+
+    /// A run that ended well without opening an activity or answering a question: it was all done already.
+    pub fn had_nothing_to_do(&self) -> bool {
+        self.status.succeeded() && self.steps.iter().all(|s| s.kind == StepKind::Course)
+    }
+
     /// The row the run is on: the newest activity still open.
     pub fn current(&self) -> Option<u64> {
         if self.status != RunStatus::Running {
@@ -159,27 +181,35 @@ impl Dashboard {
     }
 
     /// An activity or course node opened: reuses its open row, else adds one.
-    fn open(&mut self, title: String, detail: Option<String>) {
-        let open = self.steps.iter_mut().rev().find(|s| s.kind == StepKind::Activity && s.title == title);
+    fn open(&mut self, kind: StepKind, title: String, detail: Option<String>) {
+        let open = self.steps.iter_mut().rev().find(|s| s.kind == kind && s.title == title);
         match open {
             Some(step) if step.state == StepState::Active => {
                 if detail.is_some() {
                     step.detail = detail;
                 }
             }
-            _ => self.push(StepKind::Activity, title, detail, StepState::Active),
+            // A surveyed course is opened in its own row.
+            Some(step) if kind == StepKind::Course => step.state = StepState::Active,
+            _ => self.push(kind, title, detail, StepState::Active),
         }
     }
 
-    fn close(&mut self, title: String, detail: Option<String>, state: StepState) {
-        let open = self
-            .steps
-            .iter_mut()
-            .rev()
-            .find(|s| s.kind == StepKind::Activity && s.title == title && s.state == StepState::Active);
+    fn close(&mut self, kind: StepKind, title: String, detail: Option<String>, state: StepState) {
+        let open =
+            self.steps.iter_mut().rev().find(|s| s.kind == kind && s.title == title && s.state == StepState::Active);
         match open {
             Some(step) => step.state = state,
-            None => self.push(StepKind::Activity, title, detail, state),
+            None => self.push(kind, title, detail, state),
+        }
+    }
+
+    /// A course the island survey read: one row per course however often the map is read.
+    fn course(&mut self, title: String, state: StepState) {
+        match self.steps.iter_mut().find(|s| s.kind == StepKind::Course && s.title == title) {
+            Some(step) if step.state != StepState::Active => step.state = state,
+            Some(_) => {}
+            None => self.push(StepKind::Course, title, None, state),
         }
     }
 
@@ -221,20 +251,40 @@ impl Dashboard {
             }
             "Opening activity" | "Running activity" | "Opening course node" | "Running course node" => {
                 if let Some(title) = title {
-                    self.open(title, field_str(event, "mode").or_else(|| field_str(event, "type")));
+                    let detail = field_str(event, "mode").or_else(|| field_str(event, "type"));
+                    self.open(StepKind::Activity, title, detail);
                 }
             }
             "Activity finished" | "Course node finished" | "Completed media activity" => {
                 if let Some(title) = title {
-                    let state = match status.as_deref() {
-                        None | Some("complete" | "passed") => StepState::Done,
-                        Some(_) => StepState::Stuck,
-                    };
                     let detail = field_str(event, "kind").or_else(|| field_str(event, "mode"));
-                    self.close(title, detail, state);
+                    self.close(StepKind::Activity, title, detail, finished_state(status.as_deref()));
                 }
             }
-            "Run finished" => self.end(RunStatus::Finished(status.unwrap_or_else(|| "complete".into()))),
+            "Course checked" => {
+                if let Some(title) = title {
+                    let state = match field_str(event, "state").as_deref() {
+                        Some("complete") => StepState::Done,
+                        Some("locked") => StepState::Locked,
+                        _ => StepState::Todo,
+                    };
+                    self.course(title, state);
+                }
+            }
+            "Opening course" => {
+                if let Some(title) = title {
+                    self.open(StepKind::Course, title, None);
+                }
+            }
+            "Course finished" => {
+                if let Some(title) = title {
+                    self.close(StepKind::Course, title, None, finished_state(status.as_deref()));
+                }
+            }
+            "Run finished" => {
+                self.finished_mode = field_str(event, "mode").as_deref().and_then(RunMode::parse);
+                self.end(RunStatus::Finished(status.unwrap_or_else(|| "complete".into())));
+            }
             "Run failed" => {
                 self.error = field_str(event, "error");
                 self.end(RunStatus::Failed);
@@ -281,6 +331,13 @@ impl Dashboard {
     }
 }
 
+fn finished_state(status: Option<&str>) -> StepState {
+    match status {
+        None | Some("complete" | "passed") => StepState::Done,
+        Some(_) => StepState::Stuck,
+    }
+}
+
 /// Which of the run's screens shows the board.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -322,6 +379,22 @@ fn titles(board: &Dashboard, phase: Phase) -> (String, String) {
             "Answering in your browser. Leave it open; each step shows here.".into(),
         ),
         (Phase::Stopping, _) => ("Stopping".into(), "Finishing the current step, then the bot stops.".into()),
+        (_, RunStatus::Finished(s)) if s == ALL_COURSES_COMPLETE => {
+            let labels: Vec<&str> = board.courses().map(|c| c.title.as_str()).collect();
+            let checked = match (labels.first(), labels.last()) {
+                (Some(first), Some(last)) if first != last => format!(" The bot checked {first} to {last}."),
+                (Some(only), _) => format!(" The bot checked {only}."),
+                _ => String::new(),
+            };
+            ("All courses finished".into(), format!("Nothing left to do on Beelingua.{checked}"))
+        }
+        (_, _) if board.had_nothing_to_do() && board.finished_mode == Some(RunMode::Course) => (
+            "This course is finished".into(),
+            "Every unit and checkpoint was already done. Nothing left to do here.".into(),
+        ),
+        (_, _) if board.had_nothing_to_do() && board.finished_mode == Some(RunMode::Unit) => {
+            ("This unit is finished".into(), "Every activity was already done. Nothing left to do here.".into())
+        }
         (_, s) if s.succeeded() => ("All done".into(), format!("Answered {answered}{across}.")),
         (_, RunStatus::Finished(s)) if s == "unhandled" => (
             "Stuck on a question".into(),
@@ -395,13 +468,41 @@ fn summary(board: &Dashboard, p: &Palette) -> El {
     if board.incorrect > 0 {
         notes = notes.child(note("incorrect", &CROSS, p.bad, format!("{} incorrect", board.incorrect)));
     }
-    row()
+    let courses = board.courses().count();
+    if answered == 0 && courses > 0 {
+        let done = board.courses().filter(|c| c.state == StepState::Done).count();
+        let mut notes = row().gap(space::MD).center_y().pb(7.0);
+        let locked = board.courses().filter(|c| c.state == StepState::Locked).count();
+        if locked > 0 {
+            notes = notes.child(note("locked", &LOCK, p.ink_3, format!("{locked} locked")));
+        }
+        return row()
+            .key("summary")
+            .w_full()
+            .gap(space::LG)
+            .items_end()
+            .child(
+                two_tone(
+                    &done.to_string(),
+                    &format!(" of {} finished", plural(courses, "course", "courses")),
+                    font::FIGURE,
+                    p.ink,
+                    p.ink_3,
+                )
+                .key("answered-value"),
+            )
+            .child(notes);
+    }
+    let mut r = row()
         .key("summary")
         .w_full()
         .gap(space::LG)
         .items_end()
-        .child(two_tone(&answered.to_string(), " answered", font::FIGURE, p.ink, p.ink_3).key("answered-value"))
-        .child(notes)
+        .child(two_tone(&answered.to_string(), " answered", font::FIGURE, p.ink, p.ink_3).key("answered-value"));
+    if answered > 0 {
+        r = r.child(notes);
+    }
+    r
 }
 
 fn state_note(step: &Step, p: &Palette) -> El {
@@ -414,11 +515,15 @@ fn state_note(step: &Step, p: &Palette) -> El {
     };
     let tries = |n: u64| plural(n as usize, "try", "tries");
     match (step.kind, step.state) {
-        (StepKind::Activity, StepState::Active) => row()
+        (StepKind::Activity | StepKind::Course, StepState::Active) => row()
             .gap(6.0)
             .center_y()
             .child(text("In progress").key(format!("step-{}-state", step.id)).font(font::SMALL_STRONG).color(p.accent)),
         (StepKind::Activity, StepState::Done) => note(&CHECK, p.good, "Done".into()),
+        (StepKind::Course, StepState::Done) => note(&CHECK, p.good, "Finished".into()),
+        (_, StepState::Locked) => note(&LOCK, p.ink_3, "Locked".into()),
+        (_, StepState::Todo) => row()
+            .child(text("Not finished").key(format!("step-{}-state", step.id)).font(font::SMALL_STRONG).color(p.ink_2)),
         (_, StepState::Done) => note(&CHECK, p.good, "Correct".into()),
         (_, StepState::Retried(n)) => note(&RETRY, p.warn, format!("Correct after {}", tries(n))),
         (_, StepState::Incorrect(n)) => note(&CROSS, p.bad, format!("Incorrect after {}", tries(n))),
@@ -434,7 +539,7 @@ fn step_row(board: &Dashboard, step: &Step, current: bool, p: &Palette) -> El {
     let key = format!("step-{}", step.id);
     let r = list_row(&key, current, p);
     match step.kind {
-        StepKind::Activity => {
+        StepKind::Activity | StepKind::Course => {
             let lead = match step.state {
                 StepState::Active if current => live_dot(p.accent, p.accent_soft),
                 StepState::Done => el().size(16.0, 16.0).radius(8.0).fill(p.good).center().child(glyph(
@@ -448,6 +553,7 @@ fn step_row(board: &Dashboard, step: &Step, current: bool, p: &Palette) -> El {
                     .fill(p.warn)
                     .center()
                     .child(glyph(&BANG, 12.0, p.on_primary_fixed())),
+                StepState::Locked => el().size(16.0, 16.0).center().child(glyph(&LOCK, 14.0, p.ink_3)),
                 _ => el().size(16.0, 16.0).radius(8.0).border(1.5, p.row_border),
             };
             let questions = board
@@ -455,7 +561,7 @@ fn step_row(board: &Dashboard, step: &Step, current: bool, p: &Palette) -> El {
                 .iter()
                 .skip_while(|s| s.id != step.id)
                 .skip(1)
-                .take_while(|s| s.kind != StepKind::Activity)
+                .take_while(|s| matches!(s.kind, StepKind::Question(_)))
                 .count();
             let mut title =
                 row().grow(1.0).min_w(0.0).gap(space::SM).center_y().child(
@@ -558,16 +664,28 @@ pub fn view(board: &Dashboard, phase: Phase, actions: Vec<El>, details_open: boo
         list = list.child(step_row(board, step, current == Some(step.id), p));
     }
     if board.steps.is_empty() {
-        let waiting = if phase == Phase::Finished { "Nothing was answered." } else { "Looking at the page..." };
+        let waiting = match phase {
+            Phase::Finished if board.had_nothing_to_do() => "Nothing left to do. Everything here was already done.",
+            Phase::Finished => "Nothing was answered.",
+            _ => "Looking at the page...",
+        };
+        let lead = match phase {
+            Phase::Finished if board.had_nothing_to_do() => {
+                el().size(16.0, 16.0).radius(8.0).fill(p.good).center().child(glyph(&CHECK, 12.0, p.on_primary_fixed()))
+            }
+            _ => live_dot(p.accent, p.accent_soft),
+        };
         list = list.child(
             list_row("step-empty", phase != Phase::Finished, p)
-                .child(live_dot(p.accent, p.accent_soft))
-                .child(text(waiting).font(font::BODY).color(p.ink_2)),
+                .child(lead)
+                .child(text(waiting).key("step-empty-text").font(font::BODY).color(p.ink_2)),
         );
     }
-    let count = match board.activities() {
-        0 => plural(board.steps.len(), "question", "questions"),
-        n => plural(n, "activity", "activities"),
+    let questions = board.steps.iter().filter(|s| matches!(s.kind, StepKind::Question(_))).count();
+    let count = match (board.activities(), board.courses().count()) {
+        (0, 0) => plural(questions, "question", "questions"),
+        (0, courses) => plural(courses, "course", "courses"),
+        (n, _) => plural(n, "activity", "activities"),
     };
     let body = col()
         .key("dashboard")
@@ -623,6 +741,27 @@ pub fn demo_events() -> Vec<DemoEvent> {
         (Level::Info, "Activity finished", finished("Grammar: Present simple")),
         (Level::Info, "Run finished", vec![("status", json!("complete")), ("total", json!(3))]),
     ]
+}
+
+/// What an island run logs on a map where every course is already done, C2.2 optionally locked.
+pub fn all_courses_events(locked_last: bool) -> Vec<DemoEvent> {
+    let labels = ["B1.1", "B1.2", "B2.1", "B2.2", "C1.1", "C1.2", "C2.1", "C2.2"];
+    let state = |i: usize| if locked_last && i == labels.len() - 1 { "locked" } else { "complete" };
+    let mut events: Vec<DemoEvent> =
+        vec![(Level::Info, "Attached to LMS", vec![("url", json!("https://lms.binus.ac.id/beelingua/"))])];
+    for (i, label) in labels.iter().enumerate() {
+        let fields = vec![("label", json!(label)), ("state", json!(state(i))), ("via", json!("marker"))];
+        events.push((Level::Info, "Course checked", fields));
+    }
+    let courses: Vec<Value> =
+        labels.iter().enumerate().map(|(i, l)| json!({ "label": l, "state": state(i) })).collect();
+    events.push((Level::Info, "Every course is already finished — nothing to do", vec![("courses", json!(courses))]));
+    events.push((
+        Level::Info,
+        "Run finished",
+        vec![("status", json!(ALL_COURSES_COMPLETE)), ("courses", json!(courses)), ("mode", json!("island"))],
+    ));
+    events
 }
 
 #[cfg(test)]
@@ -775,5 +914,85 @@ mod tests {
         assert_eq!(board.lines.len(), MAX_LOG_LINES);
         assert_eq!(board.lines.front().map(|l| l.message.as_str()), Some("line 5"));
         assert_eq!(board.lines.back().map(|l| l.id), Some(MAX_LOG_LINES as u64 + 4));
+    }
+
+    fn finished_titles(board: &Dashboard) -> (String, String) {
+        titles(board, Phase::Finished)
+    }
+
+    #[test]
+    fn a_finished_island_says_every_course_is_finished() {
+        let board = board_after(&all_courses_events(false));
+        assert_eq!(board.status, RunStatus::Finished(ALL_COURSES_COMPLETE.into()));
+        assert_eq!(
+            finished_titles(&board),
+            (
+                "All courses finished".to_string(),
+                "Nothing left to do on Beelingua. The bot checked B1.1 to C2.2.".to_string()
+            )
+        );
+        let rows: Vec<(&str, StepKind, StepState)> =
+            board.steps.iter().map(|s| (s.title.as_str(), s.kind, s.state)).collect();
+        assert_eq!(rows.len(), 8);
+        assert!(rows.iter().all(|(_, kind, state)| *kind == StepKind::Course && *state == StepState::Done));
+        assert_eq!((rows[0].0, rows[7].0), ("B1.1", "C2.2"));
+        assert_eq!(board.finished_mode, Some(RunMode::Island));
+        assert!(board.had_nothing_to_do());
+        assert_eq!(humanize(board.status.label()), "All courses complete");
+    }
+
+    #[test]
+    fn a_locked_course_shows_as_locked_and_the_run_still_counts_as_finished() {
+        let board = board_after(&all_courses_events(true));
+        assert_eq!(board.steps[7].state, StepState::Locked);
+        assert!(board.status.succeeded());
+        assert_eq!(finished_titles(&board).0, "All courses finished");
+    }
+
+    #[test]
+    fn an_island_run_opens_its_surveyed_course_row_and_closes_it() {
+        let checked = |label: &str, state: &str| {
+            (Level::Info, "Course checked", vec![("label", json!(label)), ("state", json!(state))])
+        };
+        let board = board_after(&[
+            checked("B1.1", "complete"),
+            checked("B1.2", "unfinished"),
+            (Level::Info, "Opening course", vec![("label", json!("B1.2"))]),
+            (Level::Info, "Opening course node", vec![("label", json!("Unit1")), ("type", json!("unit"))]),
+            (Level::Info, "Course node finished", vec![("label", json!("Unit1")), ("status", json!("complete"))]),
+            (Level::Info, "Course finished", vec![("label", json!("B1.2")), ("status", json!("complete"))]),
+            checked("B1.1", "complete"),
+            checked("B1.2", "complete"),
+            (Level::Info, "Run finished", vec![("status", json!("complete")), ("mode", json!("island"))]),
+        ]);
+        use StepKind::{Activity, Course};
+        assert_eq!(
+            states(&board),
+            vec![(Course, StepState::Done), (Course, StepState::Done), (Activity, StepState::Done)],
+            "one row per course however often the map is read"
+        );
+        assert_eq!(finished_titles(&board).0, "All done", "a course was worked on");
+    }
+
+    #[test]
+    fn a_unit_or_course_with_nothing_left_says_it_is_finished() {
+        let finished = |fields: Vec<(&'static str, Value)>| board_after(&[(Level::Info, "Run finished", fields)]);
+        let unit = finished(vec![("status", json!("complete")), ("total", json!(6)), ("mode", json!("unit"))]);
+        assert_eq!(
+            finished_titles(&unit),
+            ("This unit is finished".into(), "Every activity was already done. Nothing left to do here.".into())
+        );
+        let course = finished(vec![
+            ("status", json!("complete")),
+            ("unit", json!({ "done": 8, "total": 8 })),
+            ("checkpoint", json!({ "done": 3, "total": 3 })),
+            ("mode", json!("course")),
+        ]);
+        assert_eq!(finished_titles(&course).0, "This course is finished");
+        let stuck = finished(vec![("status", json!("stuck")), ("mode", json!("unit"))]);
+        assert_eq!(finished_titles(&stuck).0, "Stopped partway", "only a run that ended well");
+        let mut worked = board_after(&demo_events());
+        worked.finished_mode = Some(RunMode::Unit);
+        assert_eq!(finished_titles(&worked).0, "All done", "the demo unit answered questions");
     }
 }
