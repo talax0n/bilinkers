@@ -1,6 +1,6 @@
 [package]
 name = "bilinkers"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["TX25-2"]
 edition = "2021"
 
