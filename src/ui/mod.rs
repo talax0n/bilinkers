@@ -12,16 +12,15 @@ mod welcome;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
-use rune::tok;
-use rune::{col, App, AppHandle, AppSpec, Chrome, Cx, El, FileDialogOptions, Latest, Tx, Waker};
+use rune::{App, AppHandle, AppSpec, Chrome, Cx, El, FileDialogOptions, Latest, Tx, Waker};
 
 use crate::logger::{self, Event, Level, Sink};
 use crate::session::{BrowserSetup, Connection, RunMode, Sighting};
 use crate::setup::{browser_executable, BrowserKind, BrowserPick, CodexStatus, FoundBrowser};
-pub use dashboard::{demo_events, Dashboard, DemoEvent, RunStatus, MAX_LOG_LINES};
+pub use dashboard::{demo_events, Dashboard, DemoEvent, Phase, RunStatus, MAX_LOG_LINES};
 pub use flow::BrowserStep;
 use flow::{step, Effect, Flow, Input, Screen};
-use style::{button, tones, Kind};
+use style::{button, palette, Kind};
 
 /// What the window asks of Codex, the browser and the bot. The worker calls may block; the
 /// UI-thread calls must return at once.
@@ -78,6 +77,8 @@ pub struct Ui {
     watch: Latest<Sighting>,
     /// When Home probes or Waiting looks next, on the window clock.
     next_look: f64,
+    /// Whether the run's raw log is unfolded.
+    details: bool,
 }
 
 /// Steps the flow and carries out what it asks for.
@@ -171,33 +172,27 @@ fn setup(s: &mut Ui, waker: Waker) {
 }
 
 fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
-    let dark = cx.system_dark();
-    let t = tok::theme(dark);
-    let tones = tones(dark);
-    let screen = match &s.flow.screen {
-        Screen::Welcome => welcome::view(&s.flow, &t, &tones),
-        Screen::Home => home::home(&s.flow, &t, &tones),
-        Screen::Waiting(waiting) => home::waiting(&s.flow, waiting, &t, &tones),
+    let p = palette(cx.system_dark());
+    match &s.flow.screen {
+        Screen::Welcome => welcome::view(&s.flow, &p),
+        Screen::Home => home::home(&s.flow, &p),
+        Screen::Waiting(waiting) => home::waiting(&s.flow, waiting, &p),
         Screen::Running(board) => {
-            let stop =
-                button("stop", "Stop", Kind::Secondary, true, &t, &tones, |s: &mut Ui, tx| send(s, Input::Stop, tx));
-            dashboard::view(board, stop, &t, &tones)
+            let stop = button("stop", "Stop", Kind::Secondary, true, &p, |s: &mut Ui, tx| send(s, Input::Stop, tx));
+            dashboard::view(board, Phase::Running, vec![stop], s.details, &p)
         }
-        Screen::Stopping(board) => dashboard::view(
-            board,
-            button("stop", "Stopping", Kind::Secondary, false, &t, &tones, |_: &mut Ui, _| {}),
-            &t,
-            &tones,
-        ),
+        Screen::Stopping(board) => {
+            let stop = button("stop", "Stopping", Kind::Secondary, false, &p, |_: &mut Ui, _| {});
+            dashboard::view(board, Phase::Stopping, vec![stop], s.details, &p)
+        }
         Screen::Finished(board) => {
-            let again = button("run-again", "Run again", Kind::Primary, true, &t, &tones, |s: &mut Ui, tx| {
+            let again = button("run-again", "Run again", Kind::Primary, true, &p, |s: &mut Ui, tx| {
                 send(s, Input::RunAgain, tx)
             })
             .default_button();
-            dashboard::view(board, again, &t, &tones)
+            dashboard::view(board, Phase::Finished, vec![again], s.details, &p)
         }
-    };
-    col().w_full().h_full().padding(16.0).fill(t.bg).child(screen)
+    }
 }
 
 fn new_ui(info: StartInfo, host: Arc<dyn Host>, events: Receiver<Event>) -> Ui {
@@ -211,6 +206,7 @@ fn new_ui(info: StartInfo, host: Arc<dyn Host>, events: Receiver<Event>) -> Ui {
         opened: Latest::default(),
         watch: Latest::default(),
         next_look: 0.0,
+        details: false,
     }
 }
 
@@ -226,7 +222,7 @@ fn app(spec: AppSpec<Ui>, init: impl FnOnce() -> Ui + 'static) -> App<Ui> {
         .args(Vec::<String>::new())
 }
 
-const SIZE: (f32, f32) = (820.0, 560.0);
+const SIZE: (f32, f32) = (900.0, 720.0);
 
 /// Routes logger events to a new window and runs it on this thread until it closes.
 /// Without a display it puts the stdout sink back, prints what it queued, and returns the error.
@@ -276,6 +272,7 @@ mod demo {
     use crate::detect::{PageKind, PageMode};
     use crate::setup::Origin;
     use crate::ui::flow::{Codex, Waiting};
+    use serde_json::json;
 
     pub const BRAVE: &str = "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser";
 
@@ -436,11 +433,19 @@ mod demo {
         ("waiting-open-failed", |s| {
             s.flow.screen = Screen::Waiting(Waiting::OpenFailed("Failed to launch browser at \"/Applications/Brave Browser.app/Contents/MacOS/Brave Browser\": permission denied".into()));
         }),
-        ("running", |s| {
-            let events = demo_events();
-            s.flow.screen = Screen::Running(board(&events[..events.len() - 2]));
+        ("waiting-opening", |s| s.flow.screen = Screen::Waiting(Waiting::Opening)),
+        ("running", |s| s.flow.screen = Screen::Running(board(&demo_events()[..14]))),
+        ("running-details", |s| {
+            s.flow.screen = Screen::Running(board(&demo_events()[..14]));
+            s.details = true;
         }),
         ("finished", |s| s.flow.screen = Screen::Finished(board(&demo_events()))),
+        ("stuck", |s| {
+            let mut events = demo_events()[..14].to_vec();
+            events.push((Level::Warn, "Unhandled question type: stopping", vec![("questionNum", json!(2))]));
+            events.push((Level::Info, "Run finished", vec![("status", json!("unhandled"))]));
+            s.flow.screen = Screen::Finished(board(&events));
+        }),
         ("stopped", |s| {
             let mut events = demo_events();
             events.truncate(5);
@@ -467,7 +472,11 @@ mod tests {
     }
 
     fn runtime(ui: Ui, dark: bool) -> rune::Runtime<Ui> {
-        let mut rt = rune::Runtime::new(ui, view, SIZE, rune::Env { system_dark: dark, scale: 2.0 });
+        runtime_sized(ui, dark, SIZE)
+    }
+
+    fn runtime_sized(ui: Ui, dark: bool, size: (f32, f32)) -> rune::Runtime<Ui> {
+        let mut rt = rune::Runtime::new(ui, view, size, rune::Env { system_dark: dark, scale: 2.0 });
         rt.poll = Some(poll);
         rt
     }
@@ -500,23 +509,28 @@ mod tests {
     }
 
     #[test]
-    fn the_dashboard_drains_the_channel_and_shows_the_tally_and_header() {
+    fn the_run_screen_drains_the_channel_and_shows_the_steps_and_header() {
         let (sender, receiver) = mpsc::channel();
         for (level, message, fields) in demo_events() {
             sender.send(event(level, message, fields)).unwrap();
         }
         let mut ui = ui(demo::info(), demo::FakeHost::default(), receiver);
         ui.flow.screen = Screen::Running(Dashboard::new("Course"));
-        let mut rt = runtime(ui, true);
+        // Tall enough that Details is in view without scrolling.
+        let mut rt = runtime_sized(ui, true, (945.0, 1025.0));
         rt.frame(0.0);
         rt.frame(1.0 / 60.0);
-        assert_eq!(shown(&rt, "correct-value").as_deref(), Some("3"));
-        assert_eq!(shown(&rt, "incorrect-value").as_deref(), Some("1"));
-        assert_eq!(shown(&rt, "question-value").as_deref(), Some("#4"));
-        assert_eq!(shown(&rt, "question-type").as_deref(), Some("multiple-choice"));
-        assert_eq!(shown(&rt, "mode").as_deref(), Some("Course"));
-        assert_eq!(shown(&rt, "status-label").as_deref(), Some("complete"));
-        assert!(rt.find("line-9").is_some(), "the newest log line is laid out");
+        assert_eq!(shown(&rt, "answered-value").as_deref(), Some("6 answered"));
+        assert_eq!(shown(&rt, "pill-detail").as_deref(), Some("5 of 6 correct"));
+        assert_eq!(shown(&rt, "step-2-title").as_deref(), Some("Vocabulary: Daily routines"));
+        assert_eq!(shown(&rt, "step-5-state").as_deref(), Some("Correct after 2 tries"));
+        assert_eq!(shown(&rt, "mode").as_deref(), Some("Unit"), "Detected names the mode");
+        assert_eq!(shown(&rt, "status-label").as_deref(), Some("Complete"));
+        assert_eq!(shown(&rt, "run-title").as_deref(), Some("All done"));
+        assert!(rt.find("line-16").is_none(), "the log starts folded");
+        click(&mut rt, "details");
+        assert!(rt.state.details, "Details toggles");
+        assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("line-16")), "Details unfolds the log");
         assert!(rt.find("run-again").is_some() && rt.find("stop").is_none(), "a finished run offers Run again");
     }
 
@@ -528,6 +542,7 @@ mod tests {
         }
         let mut ui = ui(demo::info(), demo::FakeHost::default(), receiver);
         ui.flow.screen = Screen::Running(Dashboard::new("Unit"));
+        ui.details = true;
         let mut rt = runtime(ui, false);
         for _ in 0..30 {
             rt.frame(1.0 / 60.0);
@@ -610,9 +625,10 @@ mod tests {
             runtime(ui(demo::info(), demo::FakeHost { sighting: Sighting::NotRunning }, mpsc::channel().1), false);
         rt.frame(0.0);
         frames_until(&mut rt, |s| s.flow.connection == Connection::NotRunning);
-        assert_eq!(shown(&rt, "codex-line-text").as_deref(), Some("Signed in with ChatGPT"));
-        assert_eq!(shown(&rt, "browser-line-text").as_deref(), Some("Browser: Brave"));
-        assert_eq!(shown(&rt, "connection-line-text").as_deref(), Some("Browser is closed. Start opens it."));
+        assert_eq!(shown(&rt, "codex-line-text").as_deref(), Some("Signed in"));
+        assert_eq!(shown(&rt, "browser-line-text").as_deref(), Some("Brave"));
+        assert_eq!(shown(&rt, "connection-line-text").as_deref(), Some("Not open yet. Start opens it."));
+        assert_eq!(shown(&rt, "how-1-about").as_deref(), Some("Opens Brave at the LMS."));
         assert!(rt.find("mode-course").is_none(), "no mode picker");
         assert_eq!(shown(&rt, "credit-text").as_deref(), Some(style::CREDIT));
         click(&mut rt, "setup");

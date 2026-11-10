@@ -1,11 +1,12 @@
 //! The welcome screen: sign in with ChatGPT through Codex, choose the browser, Continue.
 
-use rune::tok::{self, type_};
-use rune::{col, el, row, text, Color, Cursor, El, ScrollSpec};
+use rune::{col, el, row, text, Color, Cursor, El};
 
 use crate::setup::{BrowserPick, CodexStatus, Origin};
 use crate::ui::flow::{Codex, Flow, Input};
-use crate::ui::style::{badge, button, card, credit, dot, Kind, Tones, HEADING, SMALL, STEP_TITLE, SUBHEADING, TITLE};
+use crate::ui::style::{
+    bar, button, card, dot, font, hairline, marker, page, pill, space, Header, Kind, Mark, Palette, CHECK,
+};
 use crate::ui::{send, Ui};
 
 pub const CODEX_INSTALL: &str =
@@ -23,126 +24,133 @@ pub fn signed_in_text(line: &str) -> String {
     }
 }
 
-/// A step's heading: its key, number, whether it is done, its title and what it is for.
+/// A step's heading: its key, number, mark, title and what it is for.
 struct Step<'a> {
     key: &'a str,
     number: u8,
-    done: bool,
+    mark: Mark,
     title: &'a str,
     about: &'a str,
 }
 
-/// A step: its badge, title and description, an optional action on the right, then `body`.
-fn step(
-    Step { key, number, done, title, about }: Step,
-    action: Option<El>,
-    body: El,
-    t: &tok::Theme,
-    tones: &Tones,
-) -> El {
-    let mut head = row().w_full().gap(12.0).center_y().child(badge(done, number, t, tones)).child(
+/// A step card: marker, title and description, an optional action on the right, then `body`
+/// under a hairline.
+fn step(Step { key, number, mark, title, about }: Step, action: Option<El>, body: El, p: &Palette) -> El {
+    let mut head = row().w_full().padding(18.0).gap(14.0).center_y().child(marker(mark, number, p)).child(
         col()
             .grow(1.0)
             .min_w(0.0)
             .gap(2.0)
-            .child(text(title.to_string()).key(format!("{key}-title")).font(STEP_TITLE).color(t.text))
-            .child(text(about.to_string()).font(type_::BODY).color(t.text_secondary).wrap()),
+            .child(text(title.to_string()).key(format!("{key}-title")).font(font::SECTION).color(p.ink))
+            .child(text(about.to_string()).font(font::BODY).color(p.ink_2).wrap()),
     );
     if let Some(action) = action {
         head = head.child(action);
     }
-    card(key, t).w_full().padding(16.0).gap(12.0).child(head).child(col().w_full().pl(34.0).gap(6.0).child(body))
+    card(key, p).child(head).child(hairline(p)).child(col().w_full().padding(10.0).gap(6.0).child(body))
 }
 
-fn status_line(key: &str, color: Color, message: String, t: &tok::Theme) -> El {
+fn status_line(key: &str, color: Color, message: String, p: &Palette) -> El {
     row()
         .key(key)
         .role("status")
         .w_full()
-        .gap(8.0)
+        .px(8.0)
+        .py(6.0)
+        .gap(10.0)
         .center_y()
         .child(dot(color))
-        .child(text(message).key(format!("{key}-text")).font(type_::BODY).color(t.text).grow(1.0).min_w(0.0).wrap())
+        .child(text(message).key(format!("{key}-text")).font(font::BODY).color(p.ink).grow(1.0).min_w(0.0).wrap())
 }
 
-fn codex_step(flow: &Flow, t: &tok::Theme, tones: &Tones) -> El {
+fn codex_step(flow: &Flow, p: &Palette) -> El {
     let sign_in = |enabled: bool, label: &str| {
-        button("sign-in", label, Kind::Primary, enabled, t, tones, |s: &mut Ui, tx| send(s, Input::SignIn, tx))
+        button("sign-in", label, Kind::Primary, enabled, p, |s: &mut Ui, tx| send(s, Input::SignIn, tx))
     };
     let (color, message, action) = match &flow.codex {
-        Codex::Checking => (t.text_secondary, "Checking your sign-in...".to_string(), None),
-        Codex::SigningIn => (tones.accent, SIGNING_IN.to_string(), Some(sign_in(false, "Signing in"))),
-        Codex::Known(CodexStatus::SignedIn(line)) => (tones.good, signed_in_text(line), None),
+        Codex::Checking => (p.ink_3, "Checking your sign-in...".to_string(), None),
+        Codex::SigningIn => (p.accent, SIGNING_IN.to_string(), Some(sign_in(false, "Signing in"))),
+        Codex::Known(CodexStatus::SignedIn(line)) => (p.good, signed_in_text(line), None),
         Codex::Known(CodexStatus::SignedOut) => {
-            (t.text_secondary, "Not signed in yet.".to_string(), Some(sign_in(true, "Sign in with ChatGPT")))
+            (p.ink_3, "Not signed in yet.".to_string(), Some(sign_in(true, "Sign in with ChatGPT")))
         }
         Codex::Known(CodexStatus::Missing) => {
-            let retry = button("retry-codex", "Retry", Kind::Secondary, true, t, tones, |s: &mut Ui, tx| {
+            let retry = button("retry-codex", "Retry", Kind::Secondary, true, p, |s: &mut Ui, tx| {
                 send(s, Input::CheckCodex, tx)
             });
-            (tones.warn, CODEX_INSTALL.to_string(), Some(retry))
+            (p.warn, CODEX_INSTALL.to_string(), Some(retry))
         }
         Codex::Known(CodexStatus::Failed(e)) => {
-            (tones.warn, format!("Could not check your sign-in: {e}"), Some(sign_in(true, "Sign in with ChatGPT")))
+            (p.warn, format!("Could not check your sign-in: {e}"), Some(sign_in(true, "Sign in with ChatGPT")))
         }
     };
-    let mut body = col().w_full().gap(6.0).child(status_line("codex-status", color, message, t));
+    let mut body = col().w_full().gap(6.0).child(status_line("codex-status", color, message, p));
     if let Some(e) = &flow.codex_error {
         body = body.child(
-            text(format!("Sign-in did not finish: {e}")).key("codex-error").font(type_::BODY).color(tones.bad).wrap(),
+            text(format!("Sign-in did not finish: {e}"))
+                .key("codex-error")
+                .font(font::BODY)
+                .color(p.bad)
+                .px(8.0)
+                .wrap(),
         );
     }
+    let mark = if flow.signed_in() { Mark::Done } else { Mark::Current };
     step(
         Step {
             key: "codex",
             number: 1,
-            done: flow.signed_in(),
+            mark,
             title: "Sign in with ChatGPT",
             about: "The bot answers some questions with your ChatGPT account, through Codex.",
         },
         action,
         body,
-        t,
-        tones,
+        p,
     )
 }
 
-/// One browser as a radio card: its name, and below it where it is.
-fn choice(key: String, label: String, path: String, selected: bool, input: Input, t: &tok::Theme, tones: &Tones) -> El {
+/// One browser as a selectable row: its number, a radio mark, its name, and where it is.
+fn choice(key: String, number: usize, label: String, path: String, selected: bool, input: Input, p: &Palette) -> El {
     let mark = if selected {
-        el().size(16.0, 16.0).radius(8.0).border(5.0, tones.accent).fill(tones.on_accent)
+        el().size(18.0, 18.0).radius(9.0).fill(p.primary).center().child(rune::icon(&CHECK, 13.0).color(p.on_primary))
     } else {
-        el().size(16.0, 16.0).radius(8.0).border(1.0, t.control_off).fill(t.card)
+        el().size(18.0, 18.0).radius(9.0).border(1.0, p.row_border).fill(p.surface)
     };
-    row()
+    let mut r = row()
         .key(key.clone())
         .role("radio")
         .label(label.clone())
         .checked(selected)
         .focusable(true)
         .focus_selected(selected)
-        .focus_ring(2.0, 2.0, tones.accent)
+        .focus_ring(2.0, 2.0, p.accent)
         .w_full()
         .min_w(0.0)
-        .h(48.0)
-        .px(12.0)
-        .gap(10.0)
+        .h(52.0)
+        .px(space::MD)
+        .gap(space::MD)
         .center_y()
         .radius(8.0)
-        .fill(if selected { t.press } else { t.bg })
-        .border(if selected { 1.5 } else { 1.0 }, if selected { tones.accent } else { t.separator })
-        .hover(t.hover)
+        .fill(if selected { p.sunken } else { Color::TRANSPARENT })
+        .border(1.0, if selected { p.row_border } else { Color::TRANSPARENT })
+        .hover(p.hover)
         .cursor(Cursor::Pointer)
         .on_press_tx(move |s: &mut Ui, tx| send(s, input.clone(), tx))
+        .child(text(number.to_string()).font(font::NUMBER).color(p.ink_3).w(14.0))
         .child(mark)
         .child(
             col()
                 .grow(1.0)
                 .min_w(0.0)
                 .gap(1.0)
-                .child(text(label).font(type_::TITLE).color(t.text).truncate())
-                .child(text(path).key(format!("{key}-path")).font(SMALL).color(t.text_secondary).truncate()),
-        )
+                .child(text(label).font(font::STRONG).color(p.ink).truncate())
+                .child(text(path).key(format!("{key}-path")).font(font::SMALL).color(p.ink_3).truncate()),
+        );
+    if selected {
+        r = r.child(text("Selected").font(font::SMALL_STRONG).color(p.ink_2));
+    }
+    r
 }
 
 fn origin_text(origin: Origin) -> &'static str {
@@ -152,112 +160,119 @@ fn origin_text(origin: Origin) -> &'static str {
     }
 }
 
-fn browser_step(flow: &Flow, t: &tok::Theme, tones: &Tones) -> El {
+fn browser_step(flow: &Flow, p: &Palette) -> El {
     let b = &flow.browser;
-    let mut body = col().w_full().gap(8.0);
+    let mut body = col().w_full().gap(6.0);
     let mut action = None;
     if let Some(origin) = b.locked_by {
         body = match &b.setup.binary {
             Ok(_) => body.child(status_line(
                 "browser-status",
-                tones.good,
+                p.good,
                 format!("{}, chosen in {}.", b.setup.display_name(), origin_text(origin)),
-                t,
+                p,
             )),
             Err(_) => body.child(status_line(
                 "browser-status",
-                tones.bad,
+                p.bad,
                 format!(
                     "{} picks {}, which isn't installed. Change BROWSER there, or remove it to choose here.",
                     origin_text(origin),
                     b.setup.display_name()
                 ),
-                t,
+                p,
             )),
         };
     } else {
         let mut choices =
-            col().key("browsers").role("radiogroup").label("Browser").focus_group().focus_follows().w_full().gap(6.0);
-        for found in &b.installed {
+            col().key("browsers").role("radiogroup").label("Browser").focus_group().focus_follows().w_full().gap(2.0);
+        for (i, found) in b.installed.iter().enumerate() {
             let kind = found.kind;
             choices = choices.child(choice(
                 format!("browser-{}", kind.key()),
+                i + 1,
                 kind.label().to_string(),
                 found.path.display().to_string(),
                 b.pick == Some(BrowserPick::Installed(kind)),
                 Input::PickBrowser(kind),
-                t,
-                tones,
+                p,
             ));
         }
         if let Some(BrowserPick::File(path)) = &b.pick {
             let name =
                 path.file_stem().map_or_else(|| path.display().to_string(), |f| f.to_string_lossy().into_owned());
             let shown = path.display().to_string();
-            choices = choices.child(choice("browser-file".into(), name, shown, true, Input::ChooseFile, t, tones));
+            let number = b.installed.len() + 1;
+            choices = choices.child(choice("browser-file".into(), number, name, shown, true, Input::ChooseFile, p));
         }
         if b.installed.is_empty() {
-            body = body.child(status_line("browser-status", tones.warn, NONE_FOUND.to_string(), t));
-            action =
-                Some(button("choose-file", "Choose file...", Kind::Secondary, true, t, tones, |s: &mut Ui, tx| {
-                    send(s, Input::ChooseFile, tx)
-                }));
+            body = body.child(status_line("browser-status", p.warn, NONE_FOUND.to_string(), p));
+            action = Some(button("choose-file", "Choose file...", Kind::Secondary, true, p, |s: &mut Ui, tx| {
+                send(s, Input::ChooseFile, tx)
+            }));
         }
         if b.installed.len() + usize::from(matches!(b.pick, Some(BrowserPick::File(_)))) > 0 {
             body = body.child(choices);
         }
     }
     if let Some(e) = &b.error {
-        body = body.child(text(e.clone()).key("browser-error").font(type_::BODY).color(tones.bad).wrap());
+        body = body.child(text(e.clone()).key("browser-error").font(font::BODY).color(p.bad).px(8.0).wrap());
     }
+    let mark = match (b.done(), flow.signed_in()) {
+        (true, _) => Mark::Done,
+        (false, true) => Mark::Current,
+        (false, false) => Mark::Pending,
+    };
     step(
         Step {
             key: "browser",
             number: 2,
-            done: b.done(),
+            mark,
             title: "Choose your browser",
             about: "The bot opens the LMS in this browser and works in it.",
         },
         action,
         body,
-        t,
-        tones,
+        p,
     )
 }
 
-pub fn view(flow: &Flow, t: &tok::Theme, tones: &Tones) -> El {
-    let header = row()
-        .key("header")
-        .w_full()
-        .center_y()
-        .gap(8.0)
-        .child(text("Bilinkers").font(HEADING).color(t.text))
-        .child(text("Welcome").key("screen").font(SUBHEADING).color(t.text_secondary));
-    let intro = col()
-        .gap(4.0)
-        .child(text("Let's get you set up").key("welcome-title").font(TITLE).color(t.text))
-        .child(text("Two quick steps. You only need to do this once.").font(type_::BODY).color(t.text_secondary));
-    let go = button("continue", "Continue", Kind::Primary, flow.welcome_done(), t, tones, |s: &mut Ui, tx| {
+pub fn view(flow: &Flow, p: &Palette) -> El {
+    let done = usize::from(flow.signed_in()) + usize::from(flow.browser.done());
+    let progress = pill("setup-progress", p)
+        .child(text(format!("{done} of 2 done")).key("setup-progress-text").font(font::STRONG).color(p.ink))
+        .child(bar(56.0, done as f32 / 2.0, if done == 2 { p.good } else { p.primary }, p));
+    let go = button("continue", "Continue", Kind::Primary, flow.welcome_done(), p, |s: &mut Ui, tx| {
         send(s, Input::Continue, tx)
     })
     .default_button();
-    let footer = row().key("footer").w_full().center_y().child(el().grow(1.0)).child(go);
-    let steps = col()
+    let footer = row()
+        .key("footer")
+        .w_full()
+        .gap(space::MD)
+        .center_y()
+        .child(
+            text("You can change these later from Setup on the home screen.")
+                .font(font::BODY)
+                .color(p.ink_3)
+                .grow(1.0)
+                .min_w(0.0)
+                .wrap(),
+        )
+        .child(go);
+    let body = col()
         .key("steps")
-        .w_full()
-        .max_w(640.0)
-        .self_center()
-        .gap(12.0)
-        .child(intro)
-        .child(codex_step(flow, t, tones))
-        .child(browser_step(flow, t, tones))
+        .gap(space::LG)
+        .child(codex_step(flow, p))
+        .child(browser_step(flow, p))
+        .child(el().h(space::XS))
         .child(footer);
-    col()
-        .key("welcome")
-        .w_full()
-        .h_full()
-        .gap(16.0)
-        .child(header)
-        .child(col().w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(steps))
-        .child(credit(t))
+    let header = Header {
+        key: "welcome",
+        title: "Set up Bilinkers".into(),
+        subtitle: "Two quick steps. You only do this once.".into(),
+        pill: Some(progress),
+        actions: vec![],
+    };
+    page("Welcome", header, body, false, p)
 }
