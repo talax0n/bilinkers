@@ -1,21 +1,21 @@
 const fs = require('node:fs');
-const { config } = require('../src/config');
-const { attachToLms, getCurrentQuestionDom } = require('../src/browser');
-const { createRegistry } = require('../src/questionTypes/registry');
-const audioMultipleChoice = require('../src/questionTypes/audioMultipleChoice');
-const readingComprehension = require('../src/questionTypes/readingComprehension');
-const { createClient, answerQuestion } = require('../src/llm');
-const { readPills, clickPill, ensurePillsExpanded, clickSaveButton, waitForPillSaved } = require('./run-checkpoint');
-const logger = require('../src/logger');
+const { config } = require('../config');
+const { attachToLms, getCurrentQuestionDom } = require('../browser');
+const { createRegistry } = require('../questionTypes/registry');
+const audioMultipleChoice = require('../questionTypes/audioMultipleChoice');
+const readingComprehension = require('../questionTypes/readingComprehension');
+const { createClient, answerQuestion } = require('../llm');
+const { readPills, clickPill, ensurePillsExpanded, clickSaveButton, waitForPillSaved } = require('./checkpoint');
+const logger = require('../logger');
 
 // This script attaches to an already-running Chromium-based browser sitting
 // on an OPEN Final Test attempt (50 questions, 1 attempt, same pill-nav
 // native quiz DOM as a checkpoint) and reads every question into a Markdown
 // answer key. By default it never clicks an option, Save, or Submit — a Final
 // Test has exactly one attempt, so there is no room to brute-force like
-// run-checkpoint.js does. Listening questions (audioMultipleChoice) are
+// runners/checkpoint.js does. Listening questions (audioMultipleChoice) are
 // skipped since the bot can't hear the audio. Run via
-// `node scripts/cli.js final-test`, or invoke this file directly if the
+// `node src/cli.js final-test`, or invoke this file directly if the
 // browser is already up and sitting on an open Final Test attempt.
 //
 // OPT-IN LISTENING GUESSES: set FINAL_TEST_GUESS_LISTENING=1 — each listening
@@ -153,9 +153,9 @@ function reviewInstruction(previous) {
 }
 
 // A single LLM guess per question — there's no per-question feedback to loop
-// on (unlike run-exercise.js's retry-with-feedback) and only one real
+// on (unlike runners/exercise.js's retry-with-feedback) and only one real
 // attempt exists, so retries here are purely for transient call failures
-// (matches src/runner.js's callWithRetry), not for trying a different
+// (matches src/answerLoop.js's callWithRetry), not for trying a different
 // answer. Exhausting retries marks the question for manual review instead of
 // throwing, so one bad question can't abort the other 49. Also asks for a
 // self-assessed confidence (0..1) — an answer at/above confidenceThreshold is

@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { run: runCheckpoint, waitForScore, ensurePillsExpanded, waitForPillSaved, answerAllQuestions, clickSubmit } = require('../scripts/run-checkpoint');
+const { run: runCheckpoint, waitForScore, ensurePillsExpanded, waitForPillSaved, answerAllQuestions, clickSubmit } = require('../src/runners/checkpoint');
 
 function makeDriver({ gateClickable = true } = {}) {
   const urls = ['https://lms.binus.ac.id/checkpoint-gate'];
@@ -61,7 +61,7 @@ test('keeps retrying past the old 5-attempt cap until it passes', async () => {
 });
 
 // clickGateButton polls a real 8s wall-clock deadline (matches
-// run-unit.js's clickStartGate — a fixed delay would be too short after a
+// runners/unit.js's clickStartGate — a fixed delay would be too short after a
 // real route change), which outlives bun's default 5s per-test timeout;
 // this test alone needs a longer explicit timeout, not a production change.
 test('stops when the gate button is never found', { timeout: 10000 }, async () => {
@@ -617,7 +617,7 @@ test('runCheckpoint stops after 3 consecutive submit failures', async () => {
 });
 
 test('readPills and clickPill are exported for reuse by other scripts', () => {
-  const mod = require('../scripts/run-checkpoint');
+  const mod = require('../src/runners/checkpoint');
   assert.equal(typeof mod.readPills, 'function');
   assert.equal(typeof mod.clickPill, 'function');
 });

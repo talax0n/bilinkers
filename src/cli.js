@@ -3,13 +3,13 @@ const fs = require('fs');
 const { spawn } = require('child_process');
 const readline = require('readline');
 const { By } = require('selenium-webdriver');
-const { attachToLms } = require('../src/browser');
-const logger = require('../src/logger');
-const { isGroupedReadingLayout, groupedReadingLayoutFromDocument } = require('./grouped-reading');
+const { attachToLms } = require('./browser');
+const logger = require('./logger');
+const { isGroupedReadingLayout, groupedReadingLayoutFromDocument } = require('./groupedReading');
 
 // One-command entry point: launches your Chromium-based browser with remote
 // debugging on, waits for you to log in and open the exercise, then runs the
-// matching bot script. Usage: node scripts/cli.js [exercise|iframe|reading|unit|checkpoint|course|final-test] [url]
+// matching bot script. Usage: node src/cli.js [exercise|iframe|reading|unit|checkpoint|course|final-test] [url]
 // Mode is optional — if omitted, it's auto-detected from the page after you
 // press Enter (the native MUI exercise, an LTI-embedded iframe activity, and
 // a unit's own activity list all have distinct, unambiguous DOM markers), so
@@ -31,13 +31,13 @@ const DEFAULT_BINARY_PATHS = {
 };
 
 const MODES = {
-  exercise: '../scripts/run-exercise.js',
-  unit: '../scripts/run-unit.js',
-  iframe: '../scripts/run-iframe-exercise.js',
-  reading: '../scripts/run-reading-exercise.js',
-  checkpoint: '../scripts/run-checkpoint.js',
-  course: '../scripts/run-course.js',
-  'final-test': '../scripts/run-final-test.js',
+  exercise: './runners/exercise.js',
+  unit: './runners/unit.js',
+  iframe: './runners/iframe.js',
+  reading: './runners/reading.js',
+  checkpoint: './runners/checkpoint.js',
+  course: './runners/course.js',
+  'final-test': './runners/final-test.js',
 };
 
 function resolveBinaryPath() {
@@ -203,7 +203,7 @@ async function main() {
     mode = await detectMode();
     if (!mode) {
       console.error(
-        `Could not auto-detect the exercise type. Run with an explicit mode instead: node scripts/cli.js <${Object.keys(MODES).join('|')}>`
+        `Could not auto-detect the exercise type. Run with an explicit mode instead: node src/cli.js <${Object.keys(MODES).join('|')}>`
       );
       process.exit(1);
     }
@@ -215,7 +215,7 @@ async function main() {
   // interactively (a real TTY) — piped/CI output keeps the JSON lines.
   let dashboard = null;
   if (process.stdout.isTTY && !process.env.NO_TUI) {
-    const { createDashboard } = require('../src/dashboard');
+    const { createDashboard } = require('./dashboard');
     dashboard = await createDashboard({ title: `Beelingua Bot — ${mode}` });
     logger.setSink(dashboard.onLog);
   }

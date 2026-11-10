@@ -4,7 +4,7 @@ const { resolveChromedriverPath } = require('./chromedriver');
 
 const LMS_HOST = 'lms.binus.ac.id';
 
-// Attaches to the browser scripts/cli.js launched with --remote-debugging-port=9222
+// Attaches to the browser src/cli.js launched with --remote-debugging-port=9222
 // and focuses its LMS tab. CHROMEDRIVER_PATH overrides chromedriver auto-detection.
 async function attachToLms() {
   const options = new chrome.Options();

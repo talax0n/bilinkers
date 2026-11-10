@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { run: runUnit, completeMediaActivity } = require('../scripts/run-unit');
+const { run: runUnit, completeMediaActivity } = require('../src/runners/unit');
 
 test('waits until video playback actually ends', async () => {
   let statusChecks = 0;

@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { test } = require('node:test');
-const { leaveByNextPill, answerOpenGroups } = require('../scripts/run-reading-exercise');
+const { leaveByNextPill, answerOpenGroups } = require('../src/runners/reading');
 
 test('deferred grouped-reading traversal leaves each pill through the next numbered pill, including the final pill', async () => {
   const visits = [];
@@ -26,7 +26,7 @@ test('deferred grouped-reading traversal leaves each pill through the next numbe
 });
 
 test('deferred grouped-reading path contains no Save or generic Next progression controls', () => {
-  const source = fs.readFileSync(path.join(__dirname, '../scripts/run-reading-exercise.js'), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, '../src/runners/reading.js'), 'utf8');
 
   assert.equal(source.includes('gradeCurrent'), false);
   assert.equal(source.includes("=== 'Save'"), false);

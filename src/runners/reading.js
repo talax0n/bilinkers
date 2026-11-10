@@ -1,5 +1,5 @@
-const { attachToLms, getCurrentQuestionDom } = require('../src/browser');
-const logger = require('../src/logger');
+const { attachToLms, getCurrentQuestionDom } = require('../browser');
+const logger = require('../logger');
 
 // Brute-forces a Beelingua reading BlExercise (the numbered 1..N tile layout:
 // passage on the left, multiple option-button sub-questions on the right)

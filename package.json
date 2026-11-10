@@ -5,13 +5,13 @@
   "type": "commonjs",
   "scripts": {
     "test": "bun test tests/*.test.js",
-    "bot": "bun scripts/cli.js",
-    "exercise": "bun scripts/cli.js exercise",
-    "iframe": "bun scripts/cli.js iframe",
-    "unit": "bun scripts/cli.js unit",
-    "checkpoint": "bun scripts/cli.js checkpoint",
-    "course": "bun scripts/cli.js course",
-    "final-test": "bun scripts/cli.js final-test"
+    "bot": "bun src/cli.js",
+    "exercise": "bun src/cli.js exercise",
+    "iframe": "bun src/cli.js iframe",
+    "unit": "bun src/cli.js unit",
+    "checkpoint": "bun src/cli.js checkpoint",
+    "course": "bun src/cli.js course",
+    "final-test": "bun src/cli.js final-test"
   },
   "engines": {
     "bun": ">=1.3.0"

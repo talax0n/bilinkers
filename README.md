@@ -30,7 +30,7 @@ A browser-driven bot that completes the Beelingua English course automatically. 
 ### Prerequisites
 
 - [Bun](https://bun.sh) v1.3+ — the project runs on Bun, not plain Node. This is required for the live OpenTUI dashboard: its renderer needs Bun's native FFI and throws under plain Node even though `@opentui/core` ships a "node" build (that build only satisfies imports/types, not actual rendering). Everything else (selenium-webdriver's CDP attach, chromedriver resolution, the test suite) works identically under Bun.
-- A Chromium-based browser (Chrome, Brave, or Edge), plus a matching [chromedriver](https://googlechromelabs.github.io/chrome-for-testing/) binary — **required** for `scripts/run-exercise.js` / `run-iframe-exercise.js`, which attach over CDP (`--remote-debugging-port`). Firefox and Safari don't support this attach mode.
+- A Chromium-based browser (Chrome, Brave, or Edge), plus a matching [chromedriver](https://googlechromelabs.github.io/chrome-for-testing/) binary — **required** for `src/runners/exercise.js` / `runners/iframe.js`, which attach over CDP (`--remote-debugging-port`). Firefox and Safari don't support this attach mode.
 - An OpenAI-compatible LLM API (OpenAI itself, or any compatible proxy/provider) or a Gemini API key
 
 ### Install
@@ -55,7 +55,7 @@ cp .env.example .env
 | `OPENAI_MODEL` | Model name to use (defaults to `gpt-4o`) |
 | `GEMINI_API_KEY` | API key for Gemini (used when `LLM_PROVIDER=gemini`) |
 | `GEMINI_MODEL` | Gemini model name (defaults to `gemini-1.5-flash`) |
-| `BROWSER` | `chrome` (default), `brave`, or `edge` — which browser `scripts/cli.js` launches |
+| `BROWSER` | `chrome` (default), `brave`, or `edge` — which browser `src/cli.js` launches |
 | `BROWSER_BINARY_PATH` | Optional path to a specific browser binary (falls back to `CHROME_BINARY_PATH` for backwards compatibility) |
 
 > [!NOTE]
@@ -95,7 +95,7 @@ Don't know if yours matches? Find it yourself:
 
 ### One command (recommended)
 
-`scripts/cli.js` launches your browser with remote debugging on, waits for you to log in, then runs the bot — no manual browser flags needed.
+`src/cli.js` launches your browser with remote debugging on, waits for you to log in, then runs the bot — no manual browser flags needed.
 
 ```bash
 # Auto-detects which one you need after you open the page — no need to know
@@ -135,20 +135,20 @@ Uses `BROWSER` (`chrome`/`brave`/`edge` — CDP attach is Chromium-only) and `BR
 2. Navigate to the exercise (or unit activity list) you want the bot to complete, then run the matching script from the project root:
 
    ```bash
-   node scripts/run-exercise.js
+   node src/runners/exercise.js
    # or
-   node scripts/run-iframe-exercise.js
+   node src/runners/iframe.js
    # or, for a whole unit's activity list:
-   node scripts/run-unit.js
+   node src/runners/unit.js
    # or, for a checkpoint quiz's gate page:
-   node scripts/run-checkpoint.js
+   node src/runners/checkpoint.js
    ```
 
 3. If a question type isn't recognized, check `./logs/unhandled/` for the saved DOM dump and add a new module under `src/questionTypes/` following the existing ones as a template.
 
 ### Live dashboard
 
-When `npm run bot` / `npm run exercise` / `npm run iframe` is run in a real terminal (stdout is a TTY), an [OpenTUI](https://github.com/anomalyco/opentui) dashboard replaces the raw JSON log lines with a live view: a header, a running correct/incorrect tally, and a scrolling log feed. It's a thin wrapper around the existing logger (`src/logger.js`'s `setSink()`), so `runner.js` and every question-type module are unaware it exists. Piped output (e.g. redirecting to a file, or CI) falls back to the plain JSON lines automatically; set `NO_TUI=1` to force that fallback even in a real terminal.
+When `npm run bot` / `npm run exercise` / `npm run iframe` is run in a real terminal (stdout is a TTY), an [OpenTUI](https://github.com/anomalyco/opentui) dashboard replaces the raw JSON log lines with a live view: a header, a running correct/incorrect tally, and a scrolling log feed. It's a thin wrapper around the existing logger (`src/logger.js`'s `setSink()`), so `answerLoop.js` and every question-type module are unaware it exists. Piped output (e.g. redirecting to a file, or CI) falls back to the plain JSON lines automatically; set `NO_TUI=1` to force that fallback even in a real terminal.
 
 ## Testing
 
@@ -162,30 +162,25 @@ Runs the unit test suite (`bun test`, using Node's built-in `node:test`/`node:as
 
 ```
 src/
-  browser.js           DOM/iframe helpers — polls for the iframe on load/transitions, and waits out two transient LTI states (the launcher's auto-submit form, and the Bits player's own empty <main> render window) instead of misreading either as unanswerable content
-  chromedriver.js      Resolves a chromedriver matching whatever's actually on the CDP debug port (reuses cached, else downloads)
-  config.js             Env-driven config (timeouts, retries, paths)
-  dashboard.js         Live OpenTUI view of a run (header, correct/incorrect tally, log feed)
-  llm.js                 OpenAI-compatible / Gemini client wrapper
-  logger.js             JSON logging + unhandled-question dumps; can redirect to dashboard.js via setSink()
-  runner.js               Core per-question loop: parse → answer → check → retry (tracks every wrong answer tried and rules them out explicitly in the next prompt; retries a failed LLM/proxy call itself before counting it as a wasted attempt; delay between retries)
-  questionTypes/
-    registry.js          Ordered detect() lookup across registered types
-    audioMultipleChoice.js
-    readingComprehension.js
-    fillInBlank.js
-    errorAnalysis.js
-    vocabularyIntro.js   Ungraded LTI vocab/meaning slides — clicks through, no LLM call
-    quizMatching.js      LTI drag-and-drop word-bank questions — answered by DOM index mapping, no LLM call (see "Supported question types" above)
-    _optionButtons.js    Shared helpers for MUI-based option UIs; surfaces the page's own incorrect-answer hint text alongside the correct/incorrect outcome, when present
-    _ltiQuiz.js          Shared helpers for LTI-embedded quiz UIs, incl. extractInstructionText() (reads the author-written instruction text off the page by its consistent styling, instead of a hardcoded task description)
-scripts/
-  cli.js                   One-command entry: launches browser, waits for login, auto-detects exercise/iframe/unit/checkpoint (or takes an explicit exercise|iframe|unit|checkpoint arg), runs the bot
-  run-exercise.js          Bot logic for native MUI exercises — including the Start/Continue gate screen, numbered-pill question navigation, and the Submit → confirm → result-screen Next finishing sequence some exercises use instead of a plain "Next" button; the result screen's score is parsed and returned too, for run-checkpoint.js (exports run(driver?) and submitIfPresent(driver), also runnable directly)
-  run-iframe-exercise.js   Bot logic for LTI-embedded activities (exports run(driver?), also runnable directly)
-  run-unit.js              Walks a unit's activity list end to end: opens the next unfinished row, runs exercise/iframe against it on the same browser session, returns to the list, repeats (exports run(driver?), also runnable directly)
-  run-checkpoint.js        Drives one checkpoint gate to a passing score: clicks Start Attempt N/Continue, runs run-exercise.js's question loop on the same session, and — since attempts are unlimited on the platform — retries the whole checkpoint from the gate (capped at 5 attempts) if the resulting score is under 100; stops immediately instead of retrying on an unhandled question type (exports run(driver?, { runExerciseFn }?), also runnable directly)
-  run-final-test.js        Read-only Final Test scraper: walks every pill, guesses each non-listening question once via the LLM, skips listening questions, writes final-test-answers.md — never clicks an option, Save, or Submit (exports run(driver?), scrapeFinalTest, answerWithRetry, formatQuestionRecord, buildMarkdown, also runnable directly)
+  cli.js                Entry point: launches the browser, waits for login, detects the page, runs the matching runner
+  runners/              One file per CLI mode; each exports run(driver?) and is also runnable directly
+    course.js           Course roadmap: runs every unfinished unit/checkpoint node in order
+    unit.js             Unit activity list: runs exercise/iframe/reading on each unfinished row
+    checkpoint.js       Checkpoint gate: answers every question, retries the attempt until score 100
+    exercise.js         Native MUI exercise: gate screen, numbered pills, Submit/confirm/result sequence
+    iframe.js           LTI/Bits player activity (fill-in-blank, error analysis, vocab slides, matching)
+    reading.js          Grouped reading passage: cycles A..F per question until each locks correct
+    final-test.js       Final Test: LLM answers every question, multi-pass review, writes final-test-answers.md
+  answerLoop.js         Per-question loop: parse, answer, check, retry with the wrong answers ruled out
+  questionTypes/        One handler per question type (detect/parse/answer/checkResult) plus registry.js
+  browser.js            attachToLms(), waitForUrlChange(), iframe-aware DOM reads
+  chromedriver.js       Finds or downloads a chromedriver matching the browser on the CDP port
+  groupedReading.js     Detects the grouped-reading layout (shared by cli.js and runners/unit.js)
+  config.js             Env-driven config (retries, paths)
+  llm.js                OpenAI-compatible / Gemini client
+  logger.js             JSON logging and unhandled-question dumps; setSink() feeds dashboard.js
+  dashboard.js          Live OpenTUI view of a run
+tests/                  bun test, one file per module
 docs/superpowers/
   specs/                 Design docs
   plans/                 Implementation plans

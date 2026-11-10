@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { test } = require('node:test');
-const { waitForActivityChange, advance, createBruteForceAnswerer } = require('../scripts/run-iframe-exercise');
+const { waitForActivityChange, advance, createBruteForceAnswerer } = require('../src/runners/iframe');
 
 test('waitForActivityChange ignores URL-only changes until rendered content changes', async () => {
   const states = [
@@ -71,7 +71,7 @@ test('advance returns false when a stale visible Continue never changes rendered
 });
 
 test('iframe runner uses shared max answer retry config', () => {
-  const source = fs.readFileSync(path.join(__dirname, '../scripts/run-iframe-exercise.js'), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, '../src/runners/iframe.js'), 'utf8');
 
   assert.match(source, /retryLimit: skipLlm \? 0 : config\.retry\.maxAnswerRetries/);
   assert.doesNotMatch(source, /MAX_ANSWER_RETRIES\s*=\s*10/);

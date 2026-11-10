@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { isGroupedReadingLayout } = require('../scripts/grouped-reading');
+const { isGroupedReadingLayout } = require('../src/groupedReading');
 
 test('recognizes top-level grouped reading only with multiple numeric pills and A-restarted option groups', () => {
   assert.equal(

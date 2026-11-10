@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { processQuestion } = require('../src/runner');
+const { processQuestion } = require('../src/answerLoop');
 const { createRegistry } = require('../src/questionTypes/registry');
 
 test('processQuestion returns unhandled when no type module matches', async () => {

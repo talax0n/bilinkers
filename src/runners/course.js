@@ -1,15 +1,15 @@
-const { attachToLms, waitForUrlChange } = require('../src/browser');
-const logger = require('../src/logger');
-const { run: runUnit } = require('./run-unit');
-const { run: runCheckpoint } = require('./run-checkpoint');
+const { attachToLms, waitForUrlChange } = require('../browser');
+const logger = require('../logger');
+const { run: runUnit } = require('./unit');
+const { run: runCheckpoint } = require('./checkpoint');
 
 // This script attaches to an already-running Chromium-based browser and
 // drives a whole course level's roadmap (see the isometric city map
 // screenshot: a zig-zag road of hexagon nodes — "Unit 1", "Unit 2",
 // "Checkpoint 1", "Unit 3", ... — with a header readout "Unit 4/8  CP 1/3
 // FT 0/1") end to end: open the next unfinished Unit or Checkpoint, run the
-// matching bot (run-unit.js or run-checkpoint.js) on the same browser
-// session, come back to the map, repeat. Run via `node scripts/cli.js
+// matching bot (runners/unit.js or runners/checkpoint.js) on the same browser
+// session, come back to the map, repeat. Run via `node src/cli.js
 // course`, or invoke this file directly if the browser is already up and
 // sitting on a course's roadmap page (the URL with no /session/{id} suffix).
 // Final Test is deliberately never opened — excluded by construction (the

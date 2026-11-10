@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { submitIfPresent } = require('../scripts/run-exercise');
+const { submitIfPresent } = require('../src/runners/exercise');
 
 function makeDriver(script) {
   return {

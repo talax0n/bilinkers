@@ -1,17 +1,17 @@
-const { config } = require('../src/config');
-const { attachToLms, getCurrentQuestionDom, goToNextQuestion } = require('../src/browser');
-const { createRegistry } = require('../src/questionTypes/registry');
-const audioMultipleChoice = require('../src/questionTypes/audioMultipleChoice');
-const readingComprehension = require('../src/questionTypes/readingComprehension');
-const { processQuestion } = require('../src/runner');
-const { createClient, answerQuestion } = require('../src/llm');
-const logger = require('../src/logger');
+const { config } = require('../config');
+const { attachToLms, getCurrentQuestionDom, goToNextQuestion } = require('../browser');
+const { createRegistry } = require('../questionTypes/registry');
+const audioMultipleChoice = require('../questionTypes/audioMultipleChoice');
+const readingComprehension = require('../questionTypes/readingComprehension');
+const { processQuestion } = require('../answerLoop');
+const { createClient, answerQuestion } = require('../llm');
+const logger = require('../logger');
 
 // This script attaches to an already-running Chromium-based browser (Chrome,
 // Brave, Edge) launched with --remote-debugging-port=9222 (so your logged-in
 // session/cookies are reused instead of requiring a fresh manual login) and
 // answers every question in whichever Beelingua exercise tab is currently
-// open, in place. Run via `node scripts/cli.js exercise`, which handles the
+// open, in place. Run via `node src/cli.js exercise`, which handles the
 // browser launch + login wait for you, or invoke this file directly if the
 // browser is already up.
 
@@ -106,10 +106,10 @@ async function clickPillNumber(driver, number) {
   );
 }
 
-// existingDriver lets an orchestrator (run-unit.js) drive one continuous
+// existingDriver lets an orchestrator (runners/unit.js) drive one continuous
 // browser session across several activities instead of each script
 // re-attaching its own driver; standalone invocation (via cli.js or `node
-// scripts/run-exercise.js` directly) still attaches its own as before.
+// src/runners/exercise.js` directly) still attaches its own as before.
 async function main(existingDriver) {
   const driver = existingDriver || (await attachToLms());
   const registry = createRegistry();

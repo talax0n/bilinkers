@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { formatQuestionRecord, buildMarkdown, scrapeFinalTest, answerWithRetry, combineReview, loadPreviousAnswers, testIdFromUrl } = require('../scripts/run-final-test');
+const { formatQuestionRecord, buildMarkdown, scrapeFinalTest, answerWithRetry, combineReview, loadPreviousAnswers, testIdFromUrl } = require('../src/runners/final-test');
 
 test('formatQuestionRecord builds an mcq record from readingComprehension-shaped data', () => {
   const record = formatQuestionRecord({

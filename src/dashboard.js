@@ -3,7 +3,7 @@ const MAX_LOG_LINES = 200;
 // Live OpenTUI view of a bot run: header, running correct/incorrect tally,
 // and a scrolling log feed. Wraps the existing JSON logger rather than
 // replacing it — logger.js pushes every info/warn/error line here too, so
-// question-type modules and runner.js need no changes to support this.
+// question-type modules and answerLoop.js need no changes to support this.
 //
 // @opentui/core resolves to an async ESM module under Bun, which CommonJS
 // require() can't load — a dynamic import() is required instead, even

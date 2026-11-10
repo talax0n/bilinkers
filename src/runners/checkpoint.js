@@ -1,9 +1,9 @@
-const { config } = require('../src/config');
-const { attachToLms, getCurrentQuestionDom } = require('../src/browser');
-const { createRegistry } = require('../src/questionTypes/registry');
-const audioMultipleChoice = require('../src/questionTypes/audioMultipleChoice');
-const readingComprehension = require('../src/questionTypes/readingComprehension');
-const logger = require('../src/logger');
+const { config } = require('../config');
+const { attachToLms, getCurrentQuestionDom } = require('../browser');
+const { createRegistry } = require('../questionTypes/registry');
+const audioMultipleChoice = require('../questionTypes/audioMultipleChoice');
+const readingComprehension = require('../questionTypes/readingComprehension');
+const logger = require('../logger');
 
 // This script attaches to an already-running Chromium-based browser (Chrome,
 // Brave, Edge) launched with --remote-debugging-port=9222, and drives a
@@ -12,7 +12,7 @@ const logger = require('../src/logger');
 // click the gate's Start/Continue button, answer every question, submit,
 // check the resulting score, and — since the platform allows unlimited
 // attempts — retry the whole checkpoint from the gate if the score falls
-// short of 100, up to a safety cap. Run via `node scripts/cli.js
+// short of 100, up to a safety cap. Run via `node src/cli.js
 // checkpoint`, or invoke this file directly if the browser is already up
 // and sitting on a checkpoint's gate page.
 
@@ -54,7 +54,7 @@ async function clickGateButton(driver, timeoutMs = 8000) {
 // clicking it was the original bug here, since it comes before "Submit" in
 // DOM order and looked like a valid advance button. "Submit" is the one
 // that actually finalizes the checkpoint, gated behind an "Are you sure?"
-// Yes/No confirm, same shape as run-exercise.js's native-exercise finishing
+// Yes/No confirm, same shape as runners/exercise.js's native-exercise finishing
 // sequence (but with no further "Next" afterward — the very next render is
 // the result page).
 // The Submit click has the same silent-drop race as every other click this

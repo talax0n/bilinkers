@@ -1,10 +1,10 @@
-const { attachToLms, waitForUrlChange } = require('../src/browser');
+const { attachToLms, waitForUrlChange } = require('../browser');
 const { By } = require('selenium-webdriver');
-const logger = require('../src/logger');
-const { run: runExercise } = require('./run-exercise');
-const { run: runIframeExercise } = require('./run-iframe-exercise');
-const { run: runReadingExercise } = require('./run-reading-exercise');
-const { isGroupedReadingLayout, groupedReadingLayoutFromDocument } = require('./grouped-reading');
+const logger = require('../logger');
+const { run: runExercise } = require('./exercise');
+const { run: runIframeExercise } = require('./iframe');
+const { run: runReadingExercise } = require('./reading');
+const { isGroupedReadingLayout, groupedReadingLayoutFromDocument } = require('../groupedReading');
 
 // This script attaches to an already-running Chromium-based browser (Chrome,
 // Brave, Edge) launched with --remote-debugging-port=9222, and drives a
@@ -12,9 +12,9 @@ const { isGroupedReadingLayout, groupedReadingLayoutFromDocument } = require('./
 // video, notes, Interactive Vocabulary/Grammar Activity, Multiple Choice
 // Grammar Activity, Listening, Reading — each locked/in-progress/done) end
 // to end: open the next unfinished row, run the matching bot
-// (run-exercise.js or run-iframe-exercise.js) on the same browser session,
+// (runners/exercise.js or runners/iframe.js) on the same browser session,
 // go back to the list, repeat until nothing unlocked is left. Run via
-// `node scripts/cli.js unit`, or invoke this file directly if the browser
+// `node src/cli.js unit`, or invoke this file directly if the browser
 // is already up and sitting on a unit's activity-list page (the URL with no
 // /content/{id} suffix).
 
@@ -226,10 +226,10 @@ async function completeMediaActivity(driver) {
   return 'static';
 }
 
-// existingDriver lets an orchestrator (run-course.js) drive one continuous
+// existingDriver lets an orchestrator (runners/course.js) drive one continuous
 // browser session across several units instead of each script re-attaching
 // its own driver; standalone invocation (via cli.js or `node
-// scripts/run-unit.js` directly) still attaches its own as before.
+// src/runners/unit.js` directly) still attaches its own as before.
 async function main(existingDriver) {
   const driver = existingDriver || (await attachToLms());
   const unitUrl = await driver.getCurrentUrl();

@@ -1,14 +1,14 @@
 const { By } = require('selenium-webdriver');
-const { config } = require('../src/config');
-const { attachToLms, getCurrentQuestionDom } = require('../src/browser');
-const { createRegistry } = require('../src/questionTypes/registry');
-const fillInBlank = require('../src/questionTypes/fillInBlank');
-const errorAnalysis = require('../src/questionTypes/errorAnalysis');
-const vocabularyIntro = require('../src/questionTypes/vocabularyIntro');
-const quizMatching = require('../src/questionTypes/quizMatching');
-const { processQuestion } = require('../src/runner');
-const { createClient, answerQuestion } = require('../src/llm');
-const logger = require('../src/logger');
+const { config } = require('../config');
+const { attachToLms, getCurrentQuestionDom } = require('../browser');
+const { createRegistry } = require('../questionTypes/registry');
+const fillInBlank = require('../questionTypes/fillInBlank');
+const errorAnalysis = require('../questionTypes/errorAnalysis');
+const vocabularyIntro = require('../questionTypes/vocabularyIntro');
+const quizMatching = require('../questionTypes/quizMatching');
+const { processQuestion } = require('../answerLoop');
+const { createClient, answerQuestion } = require('../llm');
+const logger = require('../logger');
 
 // errorAnalysis has no entry here — it's answered by brute force
 // (createBruteForceAnswerer below), not an LLM call, so no format note is
@@ -37,9 +37,9 @@ function buildInstruction(handler, questionData) {
 // Brave, Edge) launched with --remote-debugging-port=9222 and answers every
 // question inside the currently open Beelingua LTI-embedded activity (Bits
 // player), advancing via the iframe's own "Continue" link. Unlike
-// run-exercise.js (the native MUI app), this activity's Check-once-per-load
+// runners/exercise.js (the native MUI app), this activity's Check-once-per-load
 // UI means a wrong answer cannot be retried in place, so retryLimit is 0
-// here. Run via `node scripts/cli.js iframe`, which handles the browser
+// here. Run via `node src/cli.js iframe`, which handles the browser
 // launch + login wait for you, or invoke this file directly if the browser
 // is already up.
 
@@ -125,7 +125,7 @@ const noopAnswer = async () => ({});
 // non-empty candidate-letter combination in increasing subset size (A, B,
 // ..., A+B, A+C, ...), one per retry, until Check passes. Simpler and more
 // reliable than reasoning about grammar through a model — there are at most
-// a handful of candidates, so exhausting them is cheap, and runner.js's own
+// a handful of candidates, so exhausting them is cheap, and answerLoop.js's own
 // retry loop (one attempt per call here) already drives the "try next,
 // check, repeat" sequence. A fresh instance per question keeps the attempt
 // counter from leaking across questions.
@@ -173,10 +173,10 @@ function createBruteForceAnswerer() {
 }
 const BRUTE_FORCE_TYPES = new Set(['errorAnalysis']);
 
-// existingDriver lets an orchestrator (run-unit.js) drive one continuous
+// existingDriver lets an orchestrator (runners/unit.js) drive one continuous
 // browser session across several activities instead of each script
 // re-attaching its own driver; standalone invocation (via cli.js or `node
-// scripts/run-iframe-exercise.js` directly) still attaches its own as before.
+// src/runners/iframe.js` directly) still attaches its own as before.
 async function main(existingDriver) {
   const driver = existingDriver || (await attachToLms());
   const registry = createRegistry();

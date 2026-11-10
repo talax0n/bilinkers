@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { run: runCourse } = require('../scripts/run-course');
+const { run: runCourse } = require('../src/runners/course');
 
 function makeDriver({ url = 'https://lms.binus.ac.id/course' } = {}) {
   const urls = [url];
