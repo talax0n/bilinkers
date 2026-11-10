@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 
 use crate::answer_loop::Answerer;
 use crate::llm::LlmError;
-use crate::question_types::{ErrorAnalysisData, OptionButton, QuestionKind};
+use crate::question_types::{ErrorAnalysisData, OptionButton, QuestionData, QuestionKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Solve {
@@ -107,7 +107,7 @@ impl BruteForceAnswerer {
 }
 
 impl Answerer<ErrorAnalysisData> for BruteForceAnswerer {
-    fn answer(
+    async fn answer(
         &mut self,
         _instruction: &str,
         data: &ErrorAnalysisData,
@@ -129,6 +129,16 @@ impl Answerer<ErrorAnalysisData> for BruteForceAnswerer {
     }
 }
 
+/// The iframe runner hands every type the parsed enum; only errorAnalysis data has candidates.
+impl Answerer<QuestionData> for BruteForceAnswerer {
+    async fn answer(&mut self, instruction: &str, data: &QuestionData, feedback: Option<&str>) -> Result<Value, LlmError> {
+        match data {
+            QuestionData::ErrorAnalysis(data) => Answerer::<ErrorAnalysisData>::answer(self, instruction, data, feedback).await,
+            _ => Err(LlmError::Failed("errorAnalysis brute force: question data has no candidates".to_string())),
+        }
+    }
+}
+
 /// `tryEachOption`: cycles through the options captured at creation, whatever the question data.
 #[derive(Debug, Clone)]
 pub struct TryEachOption {
@@ -143,7 +153,7 @@ impl TryEachOption {
 }
 
 impl<D> Answerer<D> for TryEachOption {
-    fn answer(&mut self, _instruction: &str, _data: &D, _feedback: Option<&str>) -> Result<Value, LlmError> {
+    async fn answer(&mut self, _instruction: &str, _data: &D, _feedback: Option<&str>) -> Result<Value, LlmError> {
         if self.options.is_empty() {
             return Err(LlmError::Failed("undefined is not an object (evaluating 'option.letter')".to_string()));
         }
@@ -162,7 +172,7 @@ impl<D> Answerer<D> for TryEachOption {
 pub struct EmptyAnswer;
 
 impl<D> Answerer<D> for EmptyAnswer {
-    fn answer(&mut self, _instruction: &str, _data: &D, _feedback: Option<&str>) -> Result<Value, LlmError> {
+    async fn answer(&mut self, _instruction: &str, _data: &D, _feedback: Option<&str>) -> Result<Value, LlmError> {
         Ok(json!({}))
     }
 }
@@ -180,8 +190,8 @@ mod tests {
         }
     }
 
-    fn answers(answerer: &mut BruteForceAnswerer, data: &ErrorAnalysisData) -> Result<Value, LlmError> {
-        answerer.answer("", data, None).map(|v| v["answers"].clone())
+    async fn answers(answerer: &mut BruteForceAnswerer, data: &ErrorAnalysisData) -> Result<Value, LlmError> {
+        answerer.answer("", data, None).await.map(|v| v["answers"].clone())
     }
 
     #[test]
@@ -191,27 +201,27 @@ mod tests {
         assert_eq!(iframe_retry_limit(Solve::LetterCombinations, 7), 7);
     }
 
-    #[test]
-    fn create_brute_force_answerer_tries_non_empty_candidate_letter_combinations_in_increasing_subset_size() {
+    #[tokio::test]
+    async fn create_brute_force_answerer_tries_non_empty_candidate_letter_combinations_in_increasing_subset_size() {
         let mut answerer = BruteForceAnswerer::new();
         let data = question_data(&['A', 'B', 'C']);
-        assert_eq!(answers(&mut answerer, &data), Ok(json!(["A"])));
-        assert_eq!(answers(&mut answerer, &data), Ok(json!(["B"])));
-        assert_eq!(answers(&mut answerer, &data), Ok(json!(["C"])));
-        assert_eq!(answers(&mut answerer, &data), Ok(json!(["A", "B"])));
-        assert_eq!(answers(&mut answerer, &data), Ok(json!(["A", "C"])));
-        assert_eq!(answers(&mut answerer, &data), Ok(json!(["B", "C"])));
-        assert_eq!(answers(&mut answerer, &data), Ok(json!(["A", "B", "C"])));
+        assert_eq!(answers(&mut answerer, &data).await, Ok(json!(["A"])));
+        assert_eq!(answers(&mut answerer, &data).await, Ok(json!(["B"])));
+        assert_eq!(answers(&mut answerer, &data).await, Ok(json!(["C"])));
+        assert_eq!(answers(&mut answerer, &data).await, Ok(json!(["A", "B"])));
+        assert_eq!(answers(&mut answerer, &data).await, Ok(json!(["A", "C"])));
+        assert_eq!(answers(&mut answerer, &data).await, Ok(json!(["B", "C"])));
+        assert_eq!(answers(&mut answerer, &data).await, Ok(json!(["A", "B", "C"])));
     }
 
-    #[test]
-    fn create_brute_force_answerer_exhausts_only_after_all_candidate_letter_combinations_are_tried() {
+    #[tokio::test]
+    async fn create_brute_force_answerer_exhausts_only_after_all_candidate_letter_combinations_are_tried() {
         let mut answerer = BruteForceAnswerer::new();
         let data = question_data(&['A', 'B']);
-        assert_eq!(answers(&mut answerer, &data), Ok(json!(["A"])));
-        assert_eq!(answers(&mut answerer, &data), Ok(json!(["B"])));
-        assert_eq!(answers(&mut answerer, &data), Ok(json!(["A", "B"])));
-        let err = answers(&mut answerer, &data).unwrap_err();
+        assert_eq!(answers(&mut answerer, &data).await, Ok(json!(["A"])));
+        assert_eq!(answers(&mut answerer, &data).await, Ok(json!(["B"])));
+        assert_eq!(answers(&mut answerer, &data).await, Ok(json!(["A", "B"])));
+        let err = answers(&mut answerer, &data).await.unwrap_err();
         assert!(err.to_string().contains("exhausted all candidate-letter combinations"), "{err}");
     }
 

@@ -1,11 +1,12 @@
-//! Port of `src/answerLoop.js`, synchronous. Logging is left out.
+//! Port of `src/answerLoop.js`.
 //! A sign-in error aborts at once: no call retries and no further answer attempts.
 
 use std::num::NonZeroU32;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::js;
+use crate::logger;
 use crate::llm::{LlmError, NotSignedIn};
 use crate::question_types::Dom;
 
@@ -13,6 +14,15 @@ use crate::question_types::Dom;
 pub enum Outcome {
     Correct,
     Incorrect,
+}
+
+impl Outcome {
+    pub fn name(self) -> &'static str {
+        match self {
+            Outcome::Correct => "correct",
+            Outcome::Incorrect => "incorrect",
+        }
+    }
 }
 
 /// What a handler's `checkResult` resolves to.
@@ -41,30 +51,39 @@ impl Check {
 }
 
 /// A question type bound to the live page.
+#[allow(async_fn_in_trait)]
 pub trait Handler {
     type Data;
+    /// The JS module's `name`, for log lines.
+    fn name(&self) -> &'static str {
+        "handler"
+    }
     fn parse(&self, dom: &Dom) -> Self::Data;
-    fn answer(&mut self, answer: &Value) -> Result<(), String>;
-    fn check_result(&mut self, dom: &Dom) -> Result<Check, String>;
+    async fn answer(&mut self, answer: &Value) -> Result<(), String>;
+    async fn check_result(&mut self, dom: &Dom) -> Result<Check, String>;
 }
 
 /// Produces an answer object such as `{"answer": "A"}` or `{"answers": [...]}`.
+#[allow(async_fn_in_trait)]
 pub trait Answerer<D> {
-    fn answer(&mut self, instruction: &str, question_data: &D, feedback: Option<&str>) -> Result<Value, LlmError>;
+    async fn answer(&mut self, instruction: &str, question_data: &D, feedback: Option<&str>)
+        -> Result<Value, LlmError>;
 }
 
+/// Plain closures answer at once, which keeps tests and fixed answers short.
 impl<D, F> Answerer<D> for F
 where
     F: FnMut(&str, &D, Option<&str>) -> Result<Value, LlmError>,
 {
-    fn answer(&mut self, instruction: &str, question_data: &D, feedback: Option<&str>) -> Result<Value, LlmError> {
+    async fn answer(&mut self, instruction: &str, question_data: &D, feedback: Option<&str>) -> Result<Value, LlmError> {
         self(instruction, question_data, feedback)
     }
 }
 
+#[allow(async_fn_in_trait)]
 pub trait Sleeper {
     /// Sleeps `base_ms` plus a random share of `jitter_ms` (`base + Math.random() * jitter`).
-    fn sleep(&mut self, base_ms: u64, jitter_ms: u64);
+    async fn sleep(&mut self, base_ms: u64, jitter_ms: u64);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,21 +95,29 @@ pub enum QuestionResult {
 pub const DEFAULT_CALL_ATTEMPTS: NonZeroU32 = NonZeroU32::new(3).unwrap();
 
 /// Retries transient LLM or proxy failures so they don't use up an answer attempt.
-pub fn call_with_retry<T, S: Sleeper>(
-    mut f: impl FnMut() -> Result<T, LlmError>,
+pub async fn call_with_retry<T, S: Sleeper>(
+    mut f: impl AsyncFnMut() -> Result<T, LlmError>,
     sleeper: &mut S,
     max_attempts: NonZeroU32,
 ) -> Result<T, LlmError> {
     let max_attempts = max_attempts.get();
     let mut i = 0;
     loop {
-        match f() {
+        match f().await {
             Ok(value) => return Ok(value),
             Err(err @ LlmError::NotSignedIn) => return Err(err),
             Err(err) if i + 1 >= max_attempts => return Err(err),
-            Err(_) => sleeper.sleep(1000, 1000),
+            Err(_) => sleeper.sleep(1000, 1000).await,
         }
         i += 1;
+    }
+}
+
+/// `llmResult.answer !== undefined ? llmResult.answer : llmResult.answers`, null for undefined.
+fn attempted_answer(result: &Value) -> Value {
+    match result.get("answer") {
+        Some(answer) => answer.clone(),
+        None => result.get("answers").cloned().unwrap_or(Value::Null),
     }
 }
 
@@ -112,7 +139,7 @@ fn tried_answers(result: &Value) -> Result<Vec<Value>, String> {
 }
 
 /// One answer attempt. `Ok` carries the check; `Err` is the JS catch path.
-fn attempt<H: Handler, A: Answerer<H::Data>, S: Sleeper>(
+async fn attempt<H: Handler, A: Answerer<H::Data>, S: Sleeper>(
     handler: &mut H,
     dom: &Dom,
     question_data: &H::Data,
@@ -120,21 +147,38 @@ fn attempt<H: Handler, A: Answerer<H::Data>, S: Sleeper>(
     feedback: Option<&str>,
     answerer: &mut A,
     sleeper: &mut S,
+    number: u32,
 ) -> Result<(Value, Check), LlmError> {
-    let result =
-        call_with_retry(|| answerer.answer(instruction, question_data, feedback), sleeper, DEFAULT_CALL_ATTEMPTS)?;
+    let result = call_with_retry(
+        async || answerer.answer(instruction, question_data, feedback).await,
+        sleeper,
+        DEFAULT_CALL_ATTEMPTS,
+    )
+    .await?;
     if result.is_null() {
         return Err(LlmError::Failed("null is not an object (evaluating 'llmResult.answer')".to_string()));
     }
-    handler.answer(&result)?;
-    let check = handler.check_result(dom)?;
+    let attempted = attempted_answer(&result);
+    logger::info(
+        "Attempt: submitting answer",
+        [("handler", json!(handler.name())), ("attempt", json!(number)), ("answer", attempted.clone())],
+    );
+    handler.answer(&result).await?;
+    let check = handler.check_result(dom).await?;
+    let mut fields =
+        vec![("handler", json!(handler.name())), ("attempt", json!(number)), ("answer", attempted)];
+    fields.push(("outcome", json!(check.outcome.name())));
+    if let Some(hint) = check.hint.as_deref().filter(|h| !h.is_empty()) {
+        fields.push(("hint", json!(hint)));
+    }
+    logger::info("Attempt: result", fields);
     Ok((result, check))
 }
 
 /// `retry_limit` is signed because the exercise runner passes `options.length - 1`,
 /// which is -1 for a page with no options and then makes no attempt at all.
 /// `Err` is the JS rethrow of a sign-in error.
-pub fn process_question<H: Handler, A: Answerer<H::Data>, S: Sleeper>(
+pub async fn process_question<H: Handler, A: Answerer<H::Data>, S: Sleeper>(
     handler: Option<&mut H>,
     dom: &Dom,
     instruction: &str,
@@ -156,9 +200,10 @@ pub fn process_question<H: Handler, A: Answerer<H::Data>, S: Sleeper>(
 
     while i64::from(attempts) <= retry_limit {
         if attempts > 0 {
-            sleeper.sleep(100, 100);
+            sleeper.sleep(100, 100).await;
         }
-        let result = attempt(handler, dom, &question_data, instruction, feedback.as_deref(), answerer, sleeper)
+        let result = attempt(handler, dom, &question_data, instruction, feedback.as_deref(), answerer, sleeper, attempts + 1)
+            .await
             .and_then(|(answer, check)| {
                 if check.outcome == Outcome::Incorrect {
                     for t in tried_answers(&answer)? {
@@ -188,6 +233,10 @@ pub fn process_question<H: Handler, A: Answerer<H::Data>, S: Sleeper>(
             }
             Err(LlmError::NotSignedIn) => return Err(NotSignedIn),
             Err(LlmError::Failed(message)) => {
+                logger::warn(
+                    "Attempt: failed with an error",
+                    [("handler", json!(handler.name())), ("attempt", json!(attempts + 1)), ("error", json!(message))],
+                );
                 outcome = Outcome::Incorrect;
                 feedback = Some(format!("previous attempt failed with an error: {message}"));
                 attempts += 1;
@@ -211,7 +260,7 @@ mod tests {
     struct NoSleep;
 
     impl Sleeper for NoSleep {
-        fn sleep(&mut self, _base_ms: u64, _jitter_ms: u64) {}
+        async fn sleep(&mut self, _base_ms: u64, _jitter_ms: u64) {}
     }
 
     /// A test handler built from closures, like the JS object-literal modules.
@@ -231,11 +280,11 @@ mod tests {
             json!({ "text": "q" })
         }
 
-        fn answer(&mut self, answer: &Value) -> Result<(), String> {
+        async fn answer(&mut self, answer: &Value) -> Result<(), String> {
             (self.answer)(answer)
         }
 
-        fn check_result(&mut self, _dom: &Dom) -> Result<Check, String> {
+        async fn check_result(&mut self, _dom: &Dom) -> Result<Check, String> {
             (self.check)()
         }
     }
@@ -246,15 +295,15 @@ mod tests {
         Ok(json!({ "answer": "A" }))
     }
 
-    #[test]
-    fn process_question_returns_unhandled_when_no_type_module_matches() {
+    #[tokio::test]
+    async fn process_question_returns_unhandled_when_no_type_module_matches() {
         let result =
-            process_question::<NoHandler, _, _>(None, &Dom::default(), "instr", 1, &mut always_a, &mut NoSleep);
+            process_question::<NoHandler, _, _>(None, &Dom::default(), "instr", 1, &mut always_a, &mut NoSleep).await;
         assert_eq!(result, Ok(QuestionResult::Unhandled));
     }
 
-    #[test]
-    fn process_question_succeeds_on_first_attempt_when_correct() {
+    #[tokio::test]
+    async fn process_question_succeeds_on_first_attempt_when_correct() {
         let mut answer_calls = Vec::new();
         let mut handler = FakeHandler {
             answer: |a: &Value| {
@@ -263,20 +312,20 @@ mod tests {
             },
             check: || Check::from_raw("correct"),
         };
-        let result = process_question(Some(&mut handler), &Dom::default(), "instr", 1, &mut always_a, &mut NoSleep);
+        let result = process_question(Some(&mut handler), &Dom::default(), "instr", 1, &mut always_a, &mut NoSleep).await;
         assert_eq!(result, Ok(QuestionResult::Finished { outcome: Outcome::Correct, attempts: 1 }));
         assert_eq!(answer_calls.len(), 1);
     }
 
-    #[test]
-    fn process_question_retries_once_with_feedback_then_gives_up() {
+    #[tokio::test]
+    async fn process_question_retries_once_with_feedback_then_gives_up() {
         let mut feedbacks: Vec<Option<String>> = Vec::new();
         let mut handler = FakeHandler { answer: |_: &Value| Ok(()), check: || Check::from_raw("incorrect") };
         let mut answerer = |_: &str, _: &Value, feedback: Option<&str>| {
             feedbacks.push(feedback.map(String::from));
             Ok(json!({ "answer": "A" }))
         };
-        let result = process_question(Some(&mut handler), &Dom::default(), "instr", 1, &mut answerer, &mut NoSleep);
+        let result = process_question(Some(&mut handler), &Dom::default(), "instr", 1, &mut answerer, &mut NoSleep).await;
         assert_eq!(result, Ok(QuestionResult::Finished { outcome: Outcome::Incorrect, attempts: 2 }));
         assert_eq!(
             feedbacks,
@@ -290,8 +339,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn process_question_surfaces_a_hint_and_lists_prior_wrong_guesses_so_retries_do_not_repeat_them() {
+    #[tokio::test]
+    async fn process_question_surfaces_a_hint_and_lists_prior_wrong_guesses_so_retries_do_not_repeat_them() {
         let mut feedbacks: Vec<Option<String>> = Vec::new();
         let mut answers_tried: Vec<Value> = Vec::new();
         let mut handler = FakeHandler {
@@ -307,7 +356,7 @@ mod tests {
             call += 1;
             Ok(json!({ "answer": if call == 1 { "A" } else { "B" } }))
         };
-        let result = process_question(Some(&mut handler), &Dom::default(), "instr", 1, &mut answerer, &mut NoSleep);
+        let result = process_question(Some(&mut handler), &Dom::default(), "instr", 1, &mut answerer, &mut NoSleep).await;
         assert_eq!(result, Ok(QuestionResult::Finished { outcome: Outcome::Incorrect, attempts: 2 }));
         assert_eq!(answers_tried, vec![json!("A"), json!("B")]);
         assert_eq!(
@@ -319,46 +368,47 @@ mod tests {
         );
     }
 
-    #[test]
-    fn process_question_treats_a_throwing_handler_as_incorrect_and_still_respects_retry_limit() {
+    #[tokio::test]
+    async fn process_question_treats_a_throwing_handler_as_incorrect_and_still_respects_retry_limit() {
         let mut handler =
             FakeHandler { answer: |_: &Value| Err("stale element".to_string()), check: || Check::from_raw("correct") };
-        let result = process_question(Some(&mut handler), &Dom::default(), "instr", 1, &mut always_a, &mut NoSleep);
+        let result = process_question(Some(&mut handler), &Dom::default(), "instr", 1, &mut always_a, &mut NoSleep).await;
         assert_eq!(result, Ok(QuestionResult::Finished { outcome: Outcome::Incorrect, attempts: 2 }));
     }
 
-    #[test]
-    fn process_question_treats_an_unexpected_check_result_value_as_incorrect() {
+    #[tokio::test]
+    async fn process_question_treats_an_unexpected_check_result_value_as_incorrect() {
         let mut handler = FakeHandler { answer: |_: &Value| Ok(()), check: || Check::from_raw("not-a-real-status") };
-        let result = process_question(Some(&mut handler), &Dom::default(), "instr", 0, &mut always_a, &mut NoSleep);
+        let result = process_question(Some(&mut handler), &Dom::default(), "instr", 0, &mut always_a, &mut NoSleep).await;
         assert_eq!(result, Ok(QuestionResult::Finished { outcome: Outcome::Incorrect, attempts: 1 }));
     }
 
-    #[test]
-    fn process_question_stops_on_the_first_sign_in_error_instead_of_retrying() {
+    #[tokio::test]
+    async fn process_question_stops_on_the_first_sign_in_error_instead_of_retrying() {
         let mut handler = FakeHandler { answer: |_: &Value| Ok(()), check: || Check::from_raw("correct") };
         let mut calls = 0;
         let mut answerer = |_: &str, _: &Value, _: Option<&str>| -> Result<Value, LlmError> {
             calls += 1;
             Err(LlmError::NotSignedIn)
         };
-        let result = process_question(Some(&mut handler), &Dom::default(), "i", 25, &mut answerer, &mut NoSleep);
+        let result = process_question(Some(&mut handler), &Dom::default(), "i", 25, &mut answerer, &mut NoSleep).await;
         assert_eq!(result, Err(NotSignedIn));
         assert!(result.unwrap_err().to_string().contains("codex login"));
         assert_eq!(calls, 1);
     }
 
-    #[test]
-    fn call_with_retry_retries_other_failures_up_to_max_attempts() {
+    #[tokio::test]
+    async fn call_with_retry_retries_other_failures_up_to_max_attempts() {
         let mut calls = 0;
         let result: Result<(), LlmError> = call_with_retry(
-            || {
+            async || {
                 calls += 1;
                 Err(LlmError::Failed("403 voucher".to_string()))
             },
             &mut NoSleep,
             DEFAULT_CALL_ATTEMPTS,
-        );
+        )
+        .await;
         assert_eq!(result, Err(LlmError::Failed("403 voucher".to_string())));
         assert_eq!(calls, 3);
     }

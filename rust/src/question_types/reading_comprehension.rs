@@ -1,4 +1,5 @@
-//! Detect and parse from `src/questionTypes/readingComprehension.js`.
+//! Port of `src/questionTypes/readingComprehension.js`. Answering and checking are the shared
+//! option-button pair in `option_buttons`.
 
 use serde::Serialize;
 

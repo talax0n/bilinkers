@@ -1,5 +1,5 @@
-//! Detection and parsing for each question type. Answering and result checks drive the
-//! browser and come in a later phase.
+//! The question types of `src/questionTypes/`: pure detect and parse, plus the browser
+//! actions (`answer`, `checkResult`) bound to a page by `LiveHandler`.
 
 pub mod audio_multiple_choice;
 pub mod error_analysis;
@@ -11,6 +11,10 @@ pub mod reading_comprehension;
 pub mod vocabulary_intro;
 
 use serde::Serialize;
+use serde_json::Value;
+
+use crate::answer_loop::{Check, Handler};
+use crate::browser::{FramedPage, Scoped};
 
 pub use audio_multiple_choice::AudioMultipleChoiceData;
 pub use error_analysis::{Candidate, ErrorAnalysisData};
@@ -119,6 +123,51 @@ impl<T> Registry<T> {
 impl Registry<QuestionKind> {
     pub fn find_kind(&self, dom: &Dom) -> Option<QuestionKind> {
         self.find_handler(|kind| kind.detect(dom)).copied()
+    }
+}
+
+/// A question type bound to the document its question was read from (`dom.driver` in JS).
+pub struct LiveHandler<'a, P> {
+    pub kind: QuestionKind,
+    pub driver: Scoped<'a, P>,
+}
+
+impl<P: FramedPage> Handler for LiveHandler<'_, P> {
+    type Data = QuestionData;
+
+    fn name(&self) -> &'static str {
+        self.kind.name()
+    }
+
+    fn parse(&self, dom: &Dom) -> QuestionData {
+        self.kind.parse(dom)
+    }
+
+    async fn answer(&mut self, answer: &Value) -> Result<(), String> {
+        let driver = &self.driver;
+        match self.kind {
+            QuestionKind::AudioMultipleChoice | QuestionKind::ReadingComprehension => {
+                let letter = answer.get("answer").cloned().unwrap_or(Value::Null);
+                option_buttons::select_option_and_check(driver, &letter).await
+            }
+            QuestionKind::FillInBlank => fill_in_blank::answer(driver, answer).await,
+            QuestionKind::ErrorAnalysis => error_analysis::answer(driver, answer).await,
+            QuestionKind::QuizMatching => quiz_matching::answer(driver).await,
+            QuestionKind::VocabularyIntro => vocabulary_intro::answer(driver).await,
+        }
+    }
+
+    async fn check_result(&mut self, _dom: &Dom) -> Result<Check, String> {
+        let driver = &self.driver;
+        match self.kind {
+            QuestionKind::AudioMultipleChoice | QuestionKind::ReadingComprehension => {
+                option_buttons::wait_for_check_feedback(driver).await
+            }
+            QuestionKind::FillInBlank => fill_in_blank::check_result(driver).await,
+            QuestionKind::ErrorAnalysis => error_analysis::check_result(driver).await,
+            QuestionKind::QuizMatching => quiz_matching::check_result(driver).await,
+            QuestionKind::VocabularyIntro => Ok(vocabulary_intro::check_result()),
+        }
     }
 }
 

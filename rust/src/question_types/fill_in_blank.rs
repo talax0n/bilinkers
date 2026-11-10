@@ -1,13 +1,20 @@
-//! Detect and parse from `src/questionTypes/fillInBlank.js`.
+//! Port of `src/questionTypes/fillInBlank.js`.
 
 use std::sync::LazyLock;
 
 use regex::{Captures, Regex};
 use serde::Serialize;
 
-use super::lti_quiz::extract_instruction_text;
+use std::time::Duration;
+
+use serde_json::{json, Value};
+
+use super::lti_quiz::{extract_instruction_text, poll_with_submit_retry, CLICK_SUBMIT};
 use super::option_buttons::strip_tags;
 use super::Dom;
+use crate::answer_loop::{Check, Outcome};
+use crate::browser::{jittered, Driver};
+use crate::js;
 
 // The JS uses a backreference `<\/\1>`; the regex crate has none, so each tag is its own branch.
 // No two tag names share a prefix, so at most one branch can open at any position.
@@ -80,6 +87,48 @@ pub fn parse(dom: &Dom) -> FillInBlankData {
     }
 }
 
+/// Sets each blank and submits. Extra inputs reuse the first answer.
+pub async fn answer<D: Driver>(driver: &D, llm_result: &Value) -> Result<(), String> {
+    // `llmResult.answers || [llmResult.answer]`.
+    let answers = match llm_result.get("answers") {
+        Some(answers) if js::truthy(answers) => answers.clone(),
+        _ => json!([llm_result.get("answer").cloned().unwrap_or(Value::Null)]),
+    };
+    driver
+        .execute_script(
+            r#"
+    const values = arguments[0];
+    const inputs = document.querySelectorAll('.quiz-input-sa');
+    inputs.forEach((input, i) => {
+      const val = values[i] !== undefined ? values[i] : values[0];
+      input.value = val;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+  "#,
+            &[answers],
+        )
+        .await
+        .map_err(|e| e.0)?;
+    driver.sleep(jittered(100, 100)).await;
+    driver.execute_script(CLICK_SUBMIT, &[]).await.map_err(|e| e.0)?;
+    Ok(())
+}
+
+/// The .incorrect banner flashes even on correct answers, so only .quiz-next-btn counts.
+pub async fn check_result<D: Driver>(driver: &D) -> Result<Check, String> {
+    let poll = r#"
+      const nextBtn = document.querySelector('.quiz-next-btn');
+      return !!nextBtn && getComputedStyle(nextBtn).display !== 'none';
+    "#;
+    let outcome = poll_with_submit_retry(driver, Duration::from_secs(5), poll, |v| {
+        (*v == json!(true)).then_some(Outcome::Correct)
+    })
+    .await
+    .map_err(|e| e.0)?;
+    Ok(Check::new(outcome.unwrap_or(Outcome::Incorrect)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,5 +172,39 @@ mod tests {
         let parsed = parse(&dom(LIVE_SHAPED));
         assert_eq!(parsed.sentence, "I don't know ___. (they, join us)");
         assert_eq!(parsed.blank_count, 1);
+    }
+
+    use crate::browser::fake::FakePage;
+    use crate::browser::{PageResult, Scope};
+
+    // A correct answer still flashed the .incorrect banner on the way to .quiz-next-btn going visible.
+    #[tokio::test]
+    async fn check_result_resolves_correct_once_quiz_next_btn_becomes_visible_even_after_an_incorrect_banner_flash() {
+        let mut calls = 0;
+        let page = FakePage::new(|_: Scope, code: &str, _: &[Value]| -> PageResult<Value> {
+            calls += 1;
+            if code.contains("quiz-next-btn") {
+                return Ok(json!(calls >= 3));
+            }
+            Ok(Value::Null)
+        });
+        assert_eq!(check_result(&page).await, Ok(Check::new(Outcome::Correct)));
+    }
+
+    #[tokio::test]
+    async fn check_result_resolves_incorrect_after_the_deadline_if_quiz_next_btn_never_appears_retrying_submit_once() {
+        let mut submit_clicks = 0;
+        let page = FakePage::new(|_: Scope, code: &str, _: &[Value]| -> PageResult<Value> {
+            if code.contains("quiz-next-btn") {
+                return Ok(json!(false));
+            }
+            if code.contains("quiz-submit-btn") {
+                submit_clicks += 1;
+            }
+            Ok(Value::Null)
+        });
+        assert_eq!(check_result(&page).await, Ok(Check::new(Outcome::Incorrect)));
+        drop(page);
+        assert_eq!(submit_clicks, 1);
     }
 }

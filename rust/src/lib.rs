@@ -2,6 +2,7 @@ pub mod answer_loop;
 pub mod browser;
 pub mod config;
 pub mod final_test;
+pub mod frame;
 pub mod grouped_reading;
 pub mod js;
 pub mod llm;

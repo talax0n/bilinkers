@@ -244,7 +244,7 @@ now believe is correct. Report your confidence in your OWN judgment alone.",
 }
 
 /// One answer per question. Retries cover transient call failures only.
-pub fn answer_with_retry<D, A: Answerer<D>, S: Sleeper>(
+pub async fn answer_with_retry<D, A: Answerer<D>, S: Sleeper>(
     answerer: &mut A,
     question_data: &D,
     max_attempts: NonZeroU32,
@@ -257,7 +257,7 @@ pub fn answer_with_retry<D, A: Answerer<D>, S: Sleeper>(
     };
     let max_attempts = max_attempts.get();
     for attempt in 1..=max_attempts {
-        match answerer.answer(&instruction, question_data, None) {
+        match answerer.answer(&instruction, question_data, None).await {
             Ok(result) => {
                 let field = |key: &str| match &result {
                     Value::Object(fields) => fields.get(key),
@@ -271,7 +271,7 @@ pub fn answer_with_retry<D, A: Answerer<D>, S: Sleeper>(
                 };
                 return Fresh { answer, confidence: if confidence.is_finite() { confidence } else { 0.0 } };
             }
-            Err(_) if attempt < max_attempts => sleeper.sleep(1000, 0),
+            Err(_) if attempt < max_attempts => sleeper.sleep(1000, 0).await,
             Err(_) => {}
         }
     }
@@ -287,7 +287,7 @@ mod tests {
     struct NoSleep;
 
     impl Sleeper for NoSleep {
-        fn sleep(&mut self, _base_ms: u64, _jitter_ms: u64) {}
+        async fn sleep(&mut self, _base_ms: u64, _jitter_ms: u64) {}
     }
 
     fn given(text: &str) -> FinalAnswer {
@@ -381,27 +381,27 @@ mod tests {
         );
     }
 
-    #[test]
-    fn answer_with_retry_returns_the_llm_answer_on_the_first_success() {
+    #[tokio::test]
+    async fn answer_with_retry_returns_the_llm_answer_on_the_first_success() {
         let mut answerer = |_: &str, _: &Value, _: Option<&str>| Ok(json!({ "answer": "C", "confidence": 0.95 }));
-        let result = answer_with_retry(&mut answerer, &question(), DEFAULT_ANSWER_ATTEMPTS, &mut NoSleep, None);
+        let result = answer_with_retry(&mut answerer, &question(), DEFAULT_ANSWER_ATTEMPTS, &mut NoSleep, None).await;
         assert_eq!(result, Fresh { answer: given("C"), confidence: 0.95 });
     }
 
-    #[test]
-    fn answer_with_retry_retries_up_to_max_attempts_then_returns_needs_review() {
+    #[tokio::test]
+    async fn answer_with_retry_retries_up_to_max_attempts_then_returns_needs_review() {
         let mut calls = 0;
         let mut answerer = |_: &str, _: &Value, _: Option<&str>| -> Result<Value, LlmError> {
             calls += 1;
             Err(LlmError::Failed("boom".to_string()))
         };
-        let result = answer_with_retry(&mut answerer, &question(), NonZeroU32::new(3).unwrap(), &mut NoSleep, None);
+        let result = answer_with_retry(&mut answerer, &question(), NonZeroU32::new(3).unwrap(), &mut NoSleep, None).await;
         assert_eq!(result, Fresh { answer: FinalAnswer::NeedsReview, confidence: 0.0 });
         assert_eq!(calls, 3);
     }
 
-    #[test]
-    fn answer_with_retry_recovers_if_a_later_attempt_succeeds() {
+    #[tokio::test]
+    async fn answer_with_retry_recovers_if_a_later_attempt_succeeds() {
         let mut calls = 0;
         let mut answerer = |_: &str, _: &Value, _: Option<&str>| {
             calls += 1;
@@ -410,15 +410,15 @@ mod tests {
             }
             Ok(json!({ "answer": "D", "confidence": 0.8 }))
         };
-        let result = answer_with_retry(&mut answerer, &question(), NonZeroU32::new(3).unwrap(), &mut NoSleep, None);
+        let result = answer_with_retry(&mut answerer, &question(), NonZeroU32::new(3).unwrap(), &mut NoSleep, None).await;
         assert_eq!(result, Fresh { answer: given("D"), confidence: 0.8 });
         assert_eq!(calls, 2);
     }
 
-    #[test]
-    fn answer_with_retry_defaults_missing_confidence_to_0() {
+    #[tokio::test]
+    async fn answer_with_retry_defaults_missing_confidence_to_0() {
         let mut answerer = |_: &str, _: &Value, _: Option<&str>| Ok(json!({ "answer": "A" }));
-        let result = answer_with_retry(&mut answerer, &question(), DEFAULT_ANSWER_ATTEMPTS, &mut NoSleep, None);
+        let result = answer_with_retry(&mut answerer, &question(), DEFAULT_ANSWER_ATTEMPTS, &mut NoSleep, None).await;
         assert_eq!(result, Fresh { answer: given("A"), confidence: 0.0 });
     }
 

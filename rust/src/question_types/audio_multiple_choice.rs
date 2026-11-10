@@ -1,4 +1,5 @@
-//! Detect and parse from `src/questionTypes/audioMultipleChoice.js`.
+//! Port of `src/questionTypes/audioMultipleChoice.js`. Answering and checking are the shared
+//! option-button pair in `option_buttons`.
 
 use std::sync::LazyLock;
 

@@ -1,9 +1,13 @@
-//! Detect and parse from `src/questionTypes/vocabularyIntro.js`.
+//! Port of `src/questionTypes/vocabularyIntro.js`.
 
 use serde::Serialize;
 
+use serde_json::json;
+
 use super::quiz_matching::has_matching_markup;
 use super::Dom;
+use crate::answer_loop::{Check, Outcome};
+use crate::browser::{jittered, Driver};
 
 /// Intro slides carry no question data; serializes as `{}`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -26,6 +30,31 @@ pub fn detect(dom: &Dom) -> bool {
 
 pub fn parse(_dom: &Dom) -> VocabularyIntroData {
     VocabularyIntroData {}
+}
+
+/// The visible Continue sometimes has a stale href, so the `#/n` arrow is clicked instead.
+pub async fn answer<D: Driver>(driver: &D) -> Result<(), String> {
+    let clicked = driver
+        .execute_script(
+            r##"
+    const link = document.querySelector('a[href="#/n"]');
+    if (link) { link.click(); return true; }
+    return false;
+  "##,
+            &[],
+        )
+        .await
+        .map_err(|e| e.0)?;
+    if clicked != json!(true) {
+        return Err("vocabularyIntro.answer: no \"#/n\" next link found".to_string());
+    }
+    driver.sleep(jittered(100, 100)).await;
+    Ok(())
+}
+
+/// Nothing is graded on these slides.
+pub fn check_result() -> Check {
+    Check::new(Outcome::Correct)
 }
 
 #[cfg(test)]
@@ -56,5 +85,10 @@ mod tests {
     fn detect_matches_an_intro_slide_whose_embedded_quiz_manifest_json_happens_to_contain_quiz_matching() {
         let html = r##"<a href="#/n"></a><script>{"quizes":[{"quizID":"quiz-matching-14","page":70731}]}</script>"##;
         assert!(detect(&dom(html, true)));
+    }
+
+    #[test]
+    fn check_result_always_reports_correct_nothing_is_graded_on_these_pages() {
+        assert_eq!(check_result(), Check::new(Outcome::Correct));
     }
 }

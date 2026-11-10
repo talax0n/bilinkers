@@ -1,10 +1,15 @@
-//! Pure parts of `src/questionTypes/_optionButtons.js`.
+//! Port of `src/questionTypes/_optionButtons.js`.
 
 use std::sync::LazyLock;
 
+use std::time::{Duration, Instant};
+
 use regex::Regex;
 use serde::Serialize;
+use serde_json::{json, Value};
 
+use crate::answer_loop::{Check, Outcome};
+use crate::browser::Driver;
 use crate::js;
 
 pub const OPTION_BUTTON_SELECTOR: &str = "button.bl-w-full.justify-content-start";
@@ -61,4 +66,58 @@ pub fn first_rtf_block(html: &str) -> &str {
     let content_start = html[search_from..].find('>').map_or(0, |i| search_from + i + 1);
     let rtf_end = html[content_start..].find("</p></div>").map(|i| content_start + i);
     js::slice_to_index_of(html, content_start, rtf_end)
+}
+
+const CLICK_OPTION: &str = r#"
+    const letter = arguments[0];
+    const buttons = document.querySelectorAll('button.bl-w-full.justify-content-start');
+    const target = Array.from(buttons).find((btn) => btn.textContent.trim().startsWith(letter));
+    if (!target) return false;
+    target.click();
+    return true;
+  "#;
+
+const CLICK_CHECK: &str = r#"
+    const buttons = Array.from(document.querySelectorAll('button'));
+    const btn = buttons.find((b) => b.textContent.trim() === 'Check');
+    if (btn) btn.click();
+  "#;
+
+const CHECK_FEEDBACK: &str = r#"
+    const headings = Array.from(document.querySelectorAll('h5'));
+    const heading = headings.find((h) => h.textContent.trim() === 'Correct!' || h.textContent.trim() === 'Incorrect!');
+    if (!heading) return null;
+    const hintEl = heading.parentElement && heading.parentElement.nextElementSibling;
+    return {
+      outcome: heading.textContent.trim(),
+      hint: hintEl ? hintEl.textContent.trim() : null,
+    };
+  "#;
+
+/// Clicks the option button whose text starts with `letter`, then "Check".
+pub async fn select_option_and_check<D: Driver>(driver: &D, letter: &Value) -> Result<(), String> {
+    let clicked = driver.execute_script(CLICK_OPTION, std::slice::from_ref(letter)).await.map_err(|e| e.0)?;
+    if clicked != json!(true) {
+        return Err(format!("selectOptionAndCheck: no option button found for letter \"{}\"", js::to_string(letter)));
+    }
+    driver.execute_script(CLICK_CHECK, &[]).await.map_err(|e| e.0)?;
+    Ok(())
+}
+
+/// The hint next to "Incorrect!" is returned so the retry can use it.
+pub async fn wait_for_check_feedback<D: Driver>(driver: &D) -> Result<Check, String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let state = driver.execute_script(CHECK_FEEDBACK, &[]).await.map_err(|e| e.0)?;
+        match state["outcome"].as_str() {
+            Some("Correct!") => return Ok(Check::new(Outcome::Correct)),
+            Some("Incorrect!") => {
+                let hint = state["hint"].as_str().filter(|h| !h.is_empty()).map(String::from);
+                return Ok(Check { outcome: Outcome::Incorrect, hint });
+            }
+            _ => {}
+        }
+        driver.sleep(200).await;
+    }
+    Err("waitForCheckFeedback: timed out waiting for Correct!/Incorrect! feedback".to_string())
 }

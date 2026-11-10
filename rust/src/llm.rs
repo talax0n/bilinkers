@@ -193,6 +193,15 @@ impl CodexClient {
     }
 }
 
+/// `answerQuestion` as an answer-loop answerer.
+pub struct LlmAnswerer<'a>(pub &'a CodexClient);
+
+impl<D: Serialize> crate::answer_loop::Answerer<D> for LlmAnswerer<'_> {
+    async fn answer(&mut self, instruction: &str, question_data: &D, feedback: Option<&str>) -> Result<Value, LlmError> {
+        self.0.answer_question(instruction, question_data, feedback).await
+    }
+}
+
 /// A fresh directory under the system temp dir, removed on drop.
 struct TempDir(PathBuf);
 

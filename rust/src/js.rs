@@ -160,6 +160,17 @@ pub fn to_fixed_2(x: f64) -> String {
     format!("{x:.2}")
 }
 
+/// JS truthiness for a JSON value.
+pub fn truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64().is_some_and(|x| x != 0.0 && !x.is_nan()),
+        Value::String(s) => !s.is_empty(),
+        Value::Array(_) | Value::Object(_) => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
