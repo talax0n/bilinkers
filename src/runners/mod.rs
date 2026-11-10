@@ -5,6 +5,7 @@ pub mod course;
 pub mod exercise;
 pub mod final_test_runner;
 pub mod iframe;
+pub mod island;
 pub mod reading;
 pub mod unit;
 

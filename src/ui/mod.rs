@@ -424,9 +424,6 @@ mod demo {
         ("home", |s| home(s, Sighting::NotRunning)),
         ("home-lms", |s| home(s, unit_page())),
         ("waiting-no-browser", |s| waiting(s, Sighting::NotRunning)),
-        ("waiting-island", |s| {
-            waiting(s, page("Beelingua", "https://lms.binus.ac.id/beelingua", Some(PageKind::IslandMap)))
-        }),
         ("waiting-final-test", |s| {
             waiting(s, page("Final Test | Beelingua", "https://lms.binus.ac.id/beelingua/x", Some(PageKind::FinalTest)))
         }),
@@ -593,16 +590,14 @@ mod tests {
     }
 
     #[test]
-    fn the_island_map_shows_a_hint_and_keeps_waiting() {
-        let island = demo::page("Beelingua", "https://lms.binus.ac.id/beelingua", Some(PageKind::IslandMap));
-        let mut rt = runtime(ui(demo::info(), demo::FakeHost { sighting: island }, mpsc::channel().1), false);
+    fn the_island_map_starts_the_all_courses_run() {
+        let island = Some(PageKind::Mode(crate::detect::PageMode::Island));
+        let sighting = demo::page("Beelingua", "https://lms.binus.ac.id/beelingua/", island);
+        let mut rt = runtime(ui(demo::info(), demo::FakeHost { sighting }, mpsc::channel().1), false);
         rt.frame(0.0);
         click(&mut rt, "start");
-        frames_until(&mut rt, |s| matches!(&s.flow.screen, Screen::Waiting(flow::Waiting::Looking(Some(_)))));
-        assert_eq!(shown(&rt, "wait-hint").as_deref(), Some(home::ISLAND_HINT));
-        assert_eq!(shown(&rt, "wait-text").as_deref(), Some(home::WAIT_TEXT));
-        click(&mut rt, "cancel");
-        assert_eq!(rt.state.flow.screen, Screen::Home);
+        frames_until(&mut rt, |s| matches!(s.flow.screen, Screen::Running(_)));
+        assert_eq!(shown(&rt, "mode").as_deref(), Some("All courses"));
     }
 
     #[test]

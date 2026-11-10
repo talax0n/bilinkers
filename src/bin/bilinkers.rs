@@ -14,7 +14,8 @@ use bilinkers::setup::{settings_path, EnvLayers};
 
 const VERSION: &str = concat!("bilinkers ", env!("CARGO_PKG_VERSION"), ", made by ", env!("CARGO_PKG_AUTHORS"));
 
-const USAGE: &str = "usage: bilinkers [--no-ui] [course|unit|exercise|iframe|reading|checkpoint|final-test] [url]
+const USAGE: &str =
+    "usage: bilinkers [--no-ui] [island|course|unit|exercise|iframe|reading|checkpoint|final-test] [url]
        bilinkers attach | open-row \"<row title>\" | eval-frame \"<script>\" | ui-demo <rune flags>
        bilinkers --version
 Bilinkers is made by TX25-2.
@@ -22,6 +23,7 @@ Env: CDP_PORT (default 9222), BROWSER (chrome|brave|edge|chromium), BROWSER_BINA
 Settings are read from the environment, then ./.env, then the window's settings.env.
 On a terminal with a display a run opens a window that signs in, picks the browser and starts
 on the page you open; --no-ui or NO_TUI=1 keeps the terminal prompts and prints JSON lines.
+island, run on the Beelingua home, checks B1.1 to C2.2 and runs each unfinished course in order.
 final-test always runs in the terminal.
 final-test is read-only unless FINAL_TEST_AUTO_ANSWER=1 or FINAL_TEST_GUESS_LISTENING=1
 (FINAL_TEST_CONFIDENCE_THRESHOLD, FINAL_TEST_REVIEWS_REQUIRED). It never clicks Submit.";

@@ -12,8 +12,8 @@ use crate::ui::style::{
 };
 use crate::ui::{send, Ui};
 
-pub const WAIT_TEXT: &str = "Log in, then open a course, unit, or activity in the browser. The bot starts by itself.";
-pub const ISLAND_HINT: &str = "Open one of your courses";
+pub const WAIT_TEXT: &str =
+    "Log in, then open the course map, a course, a unit, or an activity in the browser. The bot starts by itself.";
 pub const FINAL_TEST_REFUSED: &str = "Final tests are not run from the app";
 
 /// A status row: a dot, what it is about, and its state on the right.
@@ -95,8 +95,8 @@ pub fn home(flow: &Flow, p: &Palette) -> El {
             "how-2",
             2,
             Mark::Pending,
-            "Open a course, unit, or activity",
-            "Log in if asked, then open the page you want done. The bot notices it and begins.",
+            "Open the course map or a course",
+            "Log in if asked, then open the page you want done. On the course map it works through every unfinished course.",
             p,
         ))
         .child(how_row(
@@ -157,10 +157,6 @@ fn wait_view(waiting: &Waiting) -> WaitView {
         Sighting::Lms { title, page, .. } => {
             let on = (!title.is_empty()).then(|| format!("On: {title}"));
             match page {
-                Some(PageKind::IslandMap) => {
-                    let notice = (Tone::Info, "This is the island map".to_string(), ISLAND_HINT.to_string());
-                    view([Done, Done, Current], on, "Waiting for a course", Some(notice))
-                }
                 Some(PageKind::FinalTest) => {
                     let notice =
                         (Tone::Warn, FINAL_TEST_REFUSED.to_string(), "Open another page to continue.".to_string());
@@ -194,9 +190,11 @@ pub fn waiting(flow: &Flow, waiting: &Waiting, p: &Palette) -> El {
             Mark::Done => "The LMS is open.".to_string(),
             _ => "Sign in to the Binus LMS in the browser if it asks.".to_string(),
         },
-        v.page.clone().unwrap_or_else(|| "A course, unit, or activity page. The run starts on its own.".to_string()),
+        v.page.clone().unwrap_or_else(|| {
+            "The course map, a course, a unit, or an activity. The run starts on its own.".to_string()
+        }),
     ];
-    let titles = ["Open the browser", "Log in to the LMS", "Open a course, unit, or activity"];
+    let titles = ["Open the browser", "Log in to the LMS", "Open the course map or a course"];
     let mut checklist = card("checklist", p).role("status").padding(6.0).gap(2.0);
     for (i, (title, about)) in titles.iter().zip(check_about).enumerate() {
         checklist = checklist.child(how_row(&format!("check-{}", i + 1), i as u8 + 1, v.marks[i], title, &about, p));

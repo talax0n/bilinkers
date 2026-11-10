@@ -18,6 +18,7 @@ use crate::config::Config;
 use crate::detect::{classify_page, detect_mode, PageKind, PageMode};
 use crate::logger;
 use crate::runners::course::{self, CourseOptions};
+use crate::runners::island::{self, IslandOptions};
 use crate::runners::{checkpoint, exercise, final_test_runner, iframe, reading, unit, Live, Report};
 use crate::setup::{search_this_machine, BrowserKind};
 
@@ -26,6 +27,7 @@ pub const STOPPED: i32 = 130;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunMode {
+    Island,
     Course,
     Unit,
     Exercise,
@@ -36,7 +38,8 @@ pub enum RunMode {
 }
 
 impl RunMode {
-    pub const ALL: [RunMode; 7] = [
+    pub const ALL: [RunMode; 8] = [
+        RunMode::Island,
         RunMode::Course,
         RunMode::Unit,
         RunMode::Exercise,
@@ -53,6 +56,7 @@ impl RunMode {
     /// The CLI argument.
     pub fn name(self) -> &'static str {
         match self {
+            RunMode::Island => "island",
             RunMode::Course => "course",
             RunMode::Unit => "unit",
             RunMode::Exercise => "exercise",
@@ -66,6 +70,7 @@ impl RunMode {
     /// The name a person reads.
     pub fn label(self) -> &'static str {
         match self {
+            RunMode::Island => "All courses",
             RunMode::Course => "Course",
             RunMode::Unit => "Unit",
             RunMode::Exercise => "Exercise",
@@ -78,6 +83,7 @@ impl RunMode {
 
     pub fn from_detected(mode: PageMode) -> RunMode {
         match mode {
+            PageMode::Island => RunMode::Island,
             PageMode::Course => RunMode::Course,
             PageMode::Unit => RunMode::Unit,
             PageMode::Exercise => RunMode::Exercise,
@@ -88,7 +94,7 @@ impl RunMode {
     }
 }
 
-pub const DETECT_FAILED: &str = "Could not auto-detect the exercise type. Run with an explicit mode instead: bilinkers <course|unit|exercise|iframe|reading|checkpoint>";
+pub const DETECT_FAILED: &str = "Could not auto-detect the exercise type. Run with an explicit mode instead: bilinkers <island|course|unit|exercise|iframe|reading|checkpoint>";
 
 /// What `.env` selects: BROWSER (default chrome) and where its binary is, or why it isn't there.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -329,6 +335,7 @@ pub async fn run_mode(
 ) -> Result<Vec<(&'static str, Value)>, String> {
     let mut runners = Live { config: config.clone() };
     let fields = match mode {
+        RunMode::Island => island::run(lms, &mut runners, IslandOptions::default()).await.map(|o| o.fields()),
         RunMode::Course => course::run(lms, &mut runners, CourseOptions::default()).await.map(|o| o.fields()),
         RunMode::Unit => unit::run(lms, &mut runners).await.map(|o| o.fields()),
         RunMode::Exercise => exercise::run(lms, config).await.map(|o| o.fields()),
@@ -337,7 +344,10 @@ pub async fn run_mode(
         RunMode::Checkpoint => checkpoint::run(lms, &mut checkpoint::LiveAttempt).await.map(|o| o.fields()),
         RunMode::FinalTest => final_test_runner::run(lms, config, env).await.map(|o| o.fields()),
     };
-    fields.map_err(|e| e.to_string())
+    let mut fields = fields.map_err(|e| e.to_string())?;
+    // The window words a finished run by its mode, e.g. a unit that had nothing left to do.
+    fields.push(("mode", json!(mode.name())));
+    Ok(fields)
 }
 
 /// Runs `mode` and logs "Run finished" or "Run failed"; the exit code.
@@ -440,10 +450,11 @@ mod tests {
 
     #[test]
     fn run_mode_names_parse_back_to_the_same_mode() {
-        for name in ["course", "unit", "exercise", "iframe", "reading", "checkpoint", "final-test"] {
+        for name in ["island", "course", "unit", "exercise", "iframe", "reading", "checkpoint", "final-test"] {
             assert_eq!(RunMode::parse(name).map(RunMode::name), Some(name));
         }
         assert_eq!(RunMode::from_detected(PageMode::Checkpoint), RunMode::Checkpoint);
+        assert_eq!(RunMode::from_detected(PageMode::Island), RunMode::Island);
         assert_eq!(RunMode::FinalTest.label(), "Final test");
         assert_eq!(RunMode::Iframe.label(), "Activity", "no jargon in the window");
     }

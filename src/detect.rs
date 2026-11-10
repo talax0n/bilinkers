@@ -15,6 +15,8 @@ pub enum PageMode {
     Course,
     Exercise,
     Unit,
+    /// The Beelingua home with the course islands B1.1 to C2.2.
+    Island,
 }
 
 impl PageMode {
@@ -26,6 +28,7 @@ impl PageMode {
             PageMode::Course => "course",
             PageMode::Exercise => "exercise",
             PageMode::Unit => "unit",
+            PageMode::Island => "island",
         }
     }
 }
@@ -36,8 +39,6 @@ pub enum PageKind {
     Mode(PageMode),
     /// Final tests run only from the terminal (`bilinkers final-test`).
     FinalTest,
-    /// The Beelingua home with the course islands, before a course is opened.
-    IslandMap,
     Other,
 }
 
@@ -114,6 +115,9 @@ pub async fn detect_mode<P: FramedPage>(page: &P) -> PageResult<Option<PageMode>
     if page.execute_script(COURSE_MAP, &[]).await? == json!(true) {
         return Ok(Some(PageMode::Course));
     }
+    if page.execute_script(ISLAND_MAP, &[]).await? == json!(true) {
+        return Ok(Some(PageMode::Island));
+    }
     let layout = page.execute_script(GROUPED_READING_LAYOUT, &[]).await?;
     let layout: GroupedReadingLayout = serde_json::from_value(layout).unwrap_or_default();
     if is_grouped_reading_layout(&layout) {
@@ -129,16 +133,13 @@ pub async fn detect_mode<P: FramedPage>(page: &P) -> PageResult<Option<PageMode>
 }
 
 /// detect_mode for the window: a Final Test is refused before anything else, since its pages
-/// look like a checkpoint or an exercise, and the island map gets its own hint. Read-only.
+/// look like a checkpoint or an exercise. Read-only.
 pub async fn classify_page<P: FramedPage>(page: &P) -> PageResult<PageKind> {
     if page.execute_script(FINAL_TEST, &[]).await? == json!(true) {
         return Ok(PageKind::FinalTest);
     }
     if let Some(mode) = detect_mode(page).await? {
         return Ok(PageKind::Mode(mode));
-    }
-    if page.execute_script(ISLAND_MAP, &[]).await? == json!(true) {
-        return Ok(PageKind::IslandMap);
     }
     Ok(PageKind::Other)
 }
@@ -179,14 +180,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_window_refuses_a_final_test_and_names_the_island_map() {
+    async fn the_window_refuses_a_final_test_and_runs_the_island_map() {
         assert_eq!(
             classify("", &["Final\\s*Test", "Start Attempt"]).await,
             PageKind::FinalTest,
             "before the checkpoint gate"
         );
         assert_eq!(classify("", &["Start Attempt"]).await, PageKind::Mode(PageMode::Checkpoint));
-        assert_eq!(classify("", &["[BC]"]).await, PageKind::IslandMap);
+        assert_eq!(classify("", &["[BC]"]).await, PageKind::Mode(PageMode::Island));
         assert_eq!(classify("<html></html>", &["bl-text-ellipsis"]).await, PageKind::Mode(PageMode::Unit));
         assert_eq!(classify("<html></html>", &[]).await, PageKind::Other);
     }
@@ -200,7 +201,8 @@ mod tests {
             Some(PageMode::Reading)
         );
         assert_eq!(detect(None, "", &["Start Attempt"]).await, Some(PageMode::Checkpoint));
-        assert_eq!(detect(None, "", &["hoverable-pointer"]).await, Some(PageMode::Course));
+        assert_eq!(detect(None, "", &["Unit|Checkpoint"]).await, Some(PageMode::Course));
+        assert_eq!(detect(None, "", &["[BC]"]).await, Some(PageMode::Island), "the island map runs too");
         assert_eq!(
             detect(None, r#"<button class="bl-w-full justify-content-start">"#, &["grouped"]).await,
             Some(PageMode::Reading)

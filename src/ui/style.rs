@@ -173,11 +173,6 @@ pub static BANG: Icon = Icon {
     view: 16.0,
     body: r#"<path d="M8 4.2V8.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="8" cy="11.6" r="1.05" fill="currentColor"/>"#,
 };
-pub static INFO: Icon = Icon {
-    name: "bilinkers-info",
-    view: 16.0,
-    body: r#"<circle cx="8" cy="4.6" r="1.05" fill="currentColor"/><path d="M8 7.3V11.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>"#,
-};
 
 pub const CREDIT: &str = "Made by TX25-2";
 
@@ -298,7 +293,6 @@ pub fn card(key: &str, p: &Palette) -> El {
 /// The tone of an inline notice.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
-    Info,
     Warn,
     Bad,
 }
@@ -312,7 +306,6 @@ pub fn notice(
     p: &Palette,
 ) -> El {
     let (ink, soft, glyph_icon) = match tone {
-        Tone::Info => (p.accent, p.accent_soft, &INFO),
         Tone::Warn => (p.warn, p.warn_soft, &BANG),
         Tone::Bad => (p.bad, p.bad_soft, &BANG),
     };

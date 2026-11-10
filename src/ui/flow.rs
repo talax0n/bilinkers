@@ -494,16 +494,15 @@ mod tests {
     }
 
     #[test]
-    fn the_island_map_and_a_final_test_keep_waiting() {
+    fn the_island_map_starts_a_run_and_a_final_test_keeps_waiting() {
         let mut f = waiting();
-        assert_eq!(effects(&mut f, Input::Watched(lms(Some(PageKind::IslandMap)))), vec![]);
-        assert_eq!(f.screen, Screen::Waiting(Waiting::Looking(Some(lms(Some(PageKind::IslandMap))))));
         assert_eq!(effects(&mut f, Input::Watched(lms(Some(PageKind::FinalTest)))), vec![], "never auto-run");
         assert!(f.watching());
         assert_eq!(
-            effects(&mut f, Input::Watched(lms(Some(PageKind::Mode(PageMode::Course))))),
-            vec![Effect::StartRun(RunMode::Course)]
+            effects(&mut f, Input::Watched(lms(Some(PageKind::Mode(PageMode::Island))))),
+            vec![Effect::StartRun(RunMode::Island)]
         );
+        assert!(matches!(&f.screen, Screen::Running(b) if b.mode == "All courses"));
     }
 
     #[test]
