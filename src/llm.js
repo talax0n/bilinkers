@@ -43,7 +43,13 @@ function askCodex(model, prompt) {
   return new Promise((resolve, reject) => {
     const child = execFile('codex', args, { timeout: 120000, maxBuffer: 10 * 1024 * 1024 }, (err, _stdout, stderr) => {
       try {
-        if (err) reject(new Error(`codex exec failed: ${String(stderr || err.message).trim().split('\n').pop()}`));
+        if (err) {
+          const detail = String(stderr || err.message).trim();
+          // ponytail: text match on the CLI's message; switch to an exit code if codex ever documents one.
+          const signIn = /log ?in|logged out|unauthori[sz]ed|401/i.test(detail);
+          const message = signIn ? 'Codex is not signed in. Run `codex login`, then rerun the bot.' : `codex exec failed: ${detail.split('\n').pop()}`;
+          reject(Object.assign(new Error(message), { signIn }));
+        }
         else resolve(fs.readFileSync(out, 'utf8'));
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });

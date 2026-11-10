@@ -1,6 +1,11 @@
 const { answerQuestion } = require('./llm');
 const logger = require('./logger');
 
+// A rejected sign-in fails the same way every time, so retrying only wastes minutes.
+function isSignInError(err) {
+  return err.status === 401 || err.signIn === true;
+}
+
 // Retries transient LLM/proxy failures so they don't use up an answer attempt.
 async function callWithRetry(fn, args, driver, maxAttempts = 3) {
   let lastErr;
@@ -8,6 +13,7 @@ async function callWithRetry(fn, args, driver, maxAttempts = 3) {
     try {
       return await fn(...args);
     } catch (err) {
+      if (isSignInError(err)) throw err;
       lastErr = err;
       if (i < maxAttempts - 1) await driver.sleep(1000 + Math.random() * 1000);
     }
@@ -63,6 +69,7 @@ async function processQuestion({
         feedback = hint ? `previous answer was wrong. Hint: ${hint}${triedNote}` : `previous answer was wrong, try again.${triedNote}`;
       }
     } catch (err) {
+      if (isSignInError(err)) throw err;
       outcome = 'incorrect';
       feedback = `previous attempt failed with an error: ${err.message}`;
       logger.warn('Attempt: failed with an error', { handler: handler.name, attempt: attempts + 1, error: err.message });

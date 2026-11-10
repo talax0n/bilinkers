@@ -169,3 +169,18 @@ test('processQuestion treats an unexpected checkResult value as incorrect', asyn
 
   assert.deepEqual(result, { status: 'incorrect', attempts: 1 });
 });
+
+test('processQuestion stops on the first sign-in error instead of retrying', async () => {
+  const registry = createRegistry();
+  registry.register({ name: 'mcq', detect: () => true, parse: () => ({}), answer: async () => {}, checkResult: async () => 'correct' });
+  let calls = 0;
+  const answerQuestionFn = async () => {
+    calls += 1;
+    throw Object.assign(new Error('Codex is not signed in. Run `codex login`, then rerun the bot.'), { signIn: true });
+  };
+  await assert.rejects(
+    processQuestion({ driver: { sleep: async () => {} }, dom: {}, registry, llmClient: {}, model: 'm', instruction: 'i', retryLimit: 25, answerQuestionFn }),
+    /codex login/
+  );
+  assert.equal(calls, 1);
+});
