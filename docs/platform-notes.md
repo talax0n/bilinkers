@@ -6,7 +6,7 @@ What the bot knows about lms.binus.ac.id and the Beelingua course pages. Most fa
 
 - The binary launches the browser with `--remote-debugging-port=9222` and the start URL (default `https://lms.binus.ac.id`) unless the debug port already answers. In the terminal (`--no-ui`) the user logs in, opens the page, and presses Enter. In the window, Start does the same launch. (src/session.rs, ensure_browser)
 - On Home the window polls `/json/list` about once a second, which lists tabs without opening or focusing any, to show whether the browser and an LMS tab are open. (src/session.rs, Connection::probe)
-- After Start the window looks again about once a second. Once a page target's URL contains `lms.binus.ac.id`, it attaches once and runs page detection (read-only scripts, no clicks) on every look, reusing that CDP session until it stops answering. A supported page starts the run by itself and the watch session is dropped, since the run attaches its own. The island map gets an "Open one of your courses" hint. (src/session.rs, Watcher; src/detect.rs, classify_page)
+- After Start the window looks again about once a second. Once a page target's URL contains `lms.binus.ac.id`, it attaches once and runs page detection (read-only scripts, no clicks) on every look, reusing that CDP session until it stops answering. A supported page starts the run by itself and the watch session is dropped, since the run attaches its own. The island map starts the island run (since 2026-11-10). (src/session.rs, Watcher; src/detect.rs, classify_page)
 - A Final Test page is refused in the window before any other detection, since its gate and questions look like a checkpoint or an exercise. It matches when the URL contains "final test" (any separator) or the body text contains "Final Test", unless the page is a course roadmap. Not yet verified on a live Final Test page. `bilinkers final-test` always runs in the terminal. (src/detect.rs, FINAL_TEST)
 - The bot talks CDP directly through chromiumoxide, so no chromedriver is needed. It uses the first tab whose URL contains `lms.binus.ac.id` and brings it to front. Pointer clicks hang in a background tab. (src/browser.rs, attach_to_lms)
 - The DevTools HTTP endpoint only answers HTTP/1.1 probes and may keep the connection open, so a probe reads up to Content-Length. (src/session.rs)
@@ -30,9 +30,10 @@ Order in `src/detect.rs` (detectMode):
 2. The iframe document contains `bl-w-full justify-content-start`. Mode `reading`. The reading BlExercise (passage plus numbered 1..N tiles, lettered option buttons) is also iframe-embedded but uses the MUI option buttons, not the Bits `quiz-input-*` markup.
 3. The body text matches `/Checkpoint/i` and a button's text starts with `Start Attempt` or equals `Continue`. Mode `checkpoint`. A checkpoint gate (for example "ENG-B1.2 - INDEPENDENT (V2) - Checkpoint 1" with Total Question, Passing Score, Maximum Attempt) has the same shape as a plain exercise's BlExercise gate. The word "Checkpoint" is the only difference.
 4. A `.hoverable-pointer` element whose whitespace-stripped text matches `^(Unit|Checkpoint)\d+$`. Mode `course`. These roadmap nodes exist on no other page.
-5. The top-level document has the grouped reading layout (see below). Mode `reading`.
-6. The top-level document contains `bl-w-full justify-content-start` (the lettered option buttons). Mode `exercise`.
-7. Two or more `button.bl-w-full` elements contain a `.bl-text-ellipsis` title. Mode `unit`. Verified against the "Unit 2" activity list, which has exactly this shape, no iframe and no lettered options.
+5. A `.hoverable-pointer` element whose whitespace-stripped text matches `^[BC]\d\.\d$`. Mode `island` (since 2026-11-10). The course islands exist only on the Beelingua home.
+6. The top-level document has the grouped reading layout (see below). Mode `reading`.
+7. The top-level document contains `bl-w-full justify-content-start` (the lettered option buttons). Mode `exercise`.
+8. Two or more `button.bl-w-full` elements contain a `.bl-text-ellipsis` title. Mode `unit`. Verified against the "Unit 2" activity list, which has exactly this shape, no iframe and no lettered options.
 
 Grouped reading layout: at least two distinct numeric `.bl-button__container` pills, and at least two visible `button.bl-w-full.justify-content-start` buttons whose text starts with "A" (two or more option groups on screen). (src/grouped_reading.rs)
 
