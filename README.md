@@ -10,13 +10,13 @@
 
 ## Quick start
 
-1. Copy the example config:
+1. Optional: copy the example config to change advanced settings:
 
    ```bash
    cp .env.example .env
    ```
 
-   The defaults work with Chrome. For Brave, set `BROWSER=brave`.
+   The window picks the browser for you. A `BROWSER` line in `.env` wins over that choice, so delete it if you want to choose in the window.
 
 2. Start Bilinkers:
 
@@ -24,12 +24,12 @@
    cargo run --release
    ```
 
-3. In the browser window that opens, log in to the LMS and go to the course page.
-4. In the Bilinkers window, pick a mode and start the run.
+3. The first time, the welcome screen asks you to sign in with ChatGPT and to choose your browser. Press Continue.
+4. Press Start. Bilinkers opens the browser at the LMS. Log in and open a course, unit, or activity, and the run starts by itself. The Final Test is never started from the window.
 
 ## Modes
 
-Pass a mode to skip the picker, for example `cargo run --release -- course`. Without one, Bilinkers detects the page type itself.
+The window always detects the page type itself. Pass a mode to use it for the first run instead, for example `cargo run --release -- course`. `final-test` always runs in the terminal.
 
 | Mode | What it does | Uses the LLM |
 |---|---|---|
@@ -57,7 +57,7 @@ A Final Test allows exactly one attempt, so `final-test` is careful by default:
 
 ## Configuration
 
-Set these in `.env`.
+Set these in the environment or in `.env`. Bilinkers reads the environment first, then `.env`, then the window's `settings.env` (`~/Library/Application Support/Beelingua/` on macOS, `%APPDATA%\Beelingua\` on Windows, `~/.config/beelingua/` on Linux). The first one that sets a key wins.
 
 | Variable | Meaning | Default |
 |---|---|---|
@@ -89,6 +89,7 @@ cargo run --release -- [--no-ui] [mode] [url]
 |---|---|
 | `src/bin/` | The command-line entry point and argument parsing |
 | `src/session.rs` | Run modes, browser launch, and the run thread that the terminal and the window share |
+| `src/setup.rs` | The Codex sign-in check, installed browser detection, and the settings file |
 | `src/browser.rs`, `src/frame.rs` | The CDP connection to the LMS tab and script evaluation inside the activity iframe |
 | `src/detect.rs` | Detects which mode fits the open page |
 | `src/runners/` | One runner per mode |
