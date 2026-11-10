@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::unit::UnitOutcome;
-use super::{CheckpointOutcome, CourseNodeRunners, Report};
+use super::{CheckpointReport, CourseNodeRunners, Report};
 use crate::browser::{Driver, PageError, PageResult};
 use crate::js;
 use crate::logger;
@@ -156,7 +156,7 @@ impl CoursePage for crate::browser::Lms {}
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodeOutcome {
     Unit(UnitOutcome),
-    Checkpoint(CheckpointOutcome),
+    Checkpoint(CheckpointReport),
 }
 
 impl NodeOutcome {
@@ -328,6 +328,7 @@ pub async fn run<P: CoursePage, R: CourseNodeRunners<P>>(
 mod tests {
     use super::*;
     use crate::runners::unit::{UnitOutcome, UnitStuck};
+    use crate::runners::CheckpointOutcome;
     use std::cell::RefCell;
 
     fn node(kind: NodeKind, number: u64, top: f64, label: &str) -> CourseNode {
@@ -407,6 +408,7 @@ mod tests {
     /// Unit and checkpoint runners that bump the fake's progress, or return a fixed outcome.
     struct FakeRunners {
         unit: Option<UnitOutcome>,
+        checkpoint: Option<CheckpointReport>,
     }
 
     impl CourseNodeRunners<FakeCourse> for FakeRunners {
@@ -418,10 +420,13 @@ mod tests {
             progress.unit = progress.unit.map(|c| Count { done: c.done + 1, ..c });
             Ok(UnitOutcome::Complete { total: 6 })
         }
-        async fn checkpoint(&mut self, page: &FakeCourse) -> PageResult<CheckpointOutcome> {
+        async fn checkpoint(&mut self, page: &FakeCourse) -> PageResult<CheckpointReport> {
+            if let Some(report) = self.checkpoint {
+                return Ok(report);
+            }
             let mut progress = page.progress.borrow_mut();
             progress.checkpoint = progress.checkpoint.map(|c| Count { done: c.done + 1, ..c });
-            Ok(CheckpointOutcome::Passed)
+            Ok(CheckpointReport::new(CheckpointOutcome::Passed, 1).score(Some(100)))
         }
     }
 
@@ -442,7 +447,7 @@ mod tests {
             ],
             Progress { unit: count(1, 3), checkpoint: count(0, 1) },
         );
-        let result = run(&page, &mut FakeRunners { unit: None }, quick()).await.unwrap();
+        let result = run(&page, &mut FakeRunners { unit: None, checkpoint: None }, quick()).await.unwrap();
         assert_eq!(*page.opened.borrow(), vec!["Unit2", "Checkpoint1", "Unit3"]);
         assert_eq!(
             result,
@@ -458,7 +463,7 @@ mod tests {
         );
         // The unit run leaves progress frozen, so only the tried-node memory ends the loop.
         let result =
-            run(&page, &mut FakeRunners { unit: Some(UnitOutcome::Complete { total: 6 }) }, quick()).await.unwrap();
+            run(&page, &mut FakeRunners { unit: Some(UnitOutcome::Complete { total: 6 }), checkpoint: None }, quick()).await.unwrap();
         assert_eq!(*page.opened.borrow(), vec!["Unit1"]);
         assert_eq!(result.status(), "complete");
     }
@@ -548,7 +553,7 @@ mod tests {
             Progress { unit: count(4, 8), checkpoint: count(1, 3) },
         );
         page.opens = false;
-        let result = run(&page, &mut FakeRunners { unit: None }, quick()).await.unwrap();
+        let result = run(&page, &mut FakeRunners { unit: None, checkpoint: None }, quick()).await.unwrap();
         assert_eq!(result, CourseOutcome::Stuck(CourseStuck::NodeDidNotOpen { label: "Unit5".to_string() }));
     }
 
@@ -559,7 +564,7 @@ mod tests {
             Progress { unit: count(0, 1), checkpoint: count(0, 0) },
         );
         let stuck = UnitOutcome::Stuck(UnitStuck::RowNotClicked { title: "Interactive Grammar Activity".to_string() });
-        let result = run(&page, &mut FakeRunners { unit: Some(stuck.clone()) }, quick()).await.unwrap();
+        let result = run(&page, &mut FakeRunners { unit: Some(stuck.clone()), checkpoint: None }, quick()).await.unwrap();
         assert_eq!(
             result,
             CourseOutcome::Stuck(CourseStuck::NodeFailed {
@@ -570,28 +575,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_course_stops_on_a_checkpoint_that_is_not_ported() {
+    async fn run_course_stops_on_a_checkpoint_with_no_gate_or_an_unhandled_page() {
+        for outcome in [CheckpointOutcome::NoGate, CheckpointOutcome::Unhandled] {
+            let page = FakeCourse::new(
+                vec![node(NodeKind::Checkpoint, 1, 500.0, "Checkpoint1"), node(NodeKind::Unit, 3, 300.0, "Unit3")],
+                Progress { unit: count(2, 3), checkpoint: count(0, 1) },
+            );
+            let report = CheckpointReport::new(outcome, 1);
+            let result =
+                run(&page, &mut FakeRunners { unit: None, checkpoint: Some(report) }, quick()).await.unwrap();
+            assert_eq!(*page.opened.borrow(), vec!["Checkpoint1"]);
+            assert_eq!(
+                result,
+                CourseOutcome::Stuck(CourseStuck::NodeFailed {
+                    label: "Checkpoint1".to_string(),
+                    outcome: NodeOutcome::Checkpoint(report),
+                })
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn run_course_moves_on_past_a_checkpoint_whose_submit_failed() {
         let page = FakeCourse::new(
-            vec![node(NodeKind::Checkpoint, 1, 500.0, "Checkpoint1")],
-            Progress { unit: count(2, 2), checkpoint: count(0, 1) },
+            vec![node(NodeKind::Checkpoint, 1, 500.0, "Checkpoint1"), node(NodeKind::Unit, 3, 300.0, "Unit3")],
+            Progress { unit: count(2, 3), checkpoint: count(0, 1) },
         );
-        let result =
-            run(&page, &mut super::super::Live { config: crate::config::build_config(&Default::default()) }, quick())
-                .await
-                .unwrap();
+        let report = CheckpointReport::new(CheckpointOutcome::SubmitFailed, 3);
+        let result = run(&page, &mut FakeRunners { unit: None, checkpoint: Some(report) }, quick()).await.unwrap();
+        assert_eq!(*page.opened.borrow(), vec!["Checkpoint1", "Unit3"]);
         assert_eq!(
             result,
-            CourseOutcome::Stuck(CourseStuck::NodeFailed {
-                label: "Checkpoint1".to_string(),
-                outcome: NodeOutcome::Checkpoint(CheckpointOutcome::NotPorted),
-            })
+            CourseOutcome::Complete { unit: Count { done: 3, total: 3 }, checkpoint: Count { done: 0, total: 1 } }
         );
     }
 
     #[tokio::test]
     async fn run_course_does_not_complete_when_roadmap_nodes_or_progress_are_absent() {
         let page = FakeCourse::new(vec![], Progress::default());
-        let result = run(&page, &mut FakeRunners { unit: None }, quick()).await.unwrap();
+        let result = run(&page, &mut FakeRunners { unit: None, checkpoint: None }, quick()).await.unwrap();
         assert_eq!(result, CourseOutcome::Stuck(CourseStuck::MissingRoadmap));
     }
 }

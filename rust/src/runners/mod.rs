@@ -1,5 +1,6 @@
-//! Ports of `src/runners/`. The checkpoint runner answers `NotPorted` until a later round.
+//! Ports of `src/runners/`.
 
+pub mod checkpoint;
 pub mod course;
 pub mod exercise;
 pub mod iframe;
@@ -10,7 +11,6 @@ use serde_json::{json, Value};
 
 use crate::browser::{FramedPage, PageResult};
 use crate::config::Config;
-use crate::logger;
 use unit::{ActivityKind, UnitOutcome, UnitPage};
 
 /// Log fields for an outcome, the JS result object spread into a log line.
@@ -115,13 +115,12 @@ pub enum CheckpointOutcome {
     Unhandled,
     NoGate,
     SubmitFailed,
-    NotPorted,
 }
 
 impl CheckpointOutcome {
     /// course.js stops on these; a submit failure moves on to the next node.
     pub fn stops_course(self) -> bool {
-        matches!(self, CheckpointOutcome::Unhandled | CheckpointOutcome::NoGate | CheckpointOutcome::NotPorted)
+        matches!(self, CheckpointOutcome::Unhandled | CheckpointOutcome::NoGate)
     }
 }
 
@@ -132,8 +131,51 @@ impl Report for CheckpointOutcome {
             CheckpointOutcome::Unhandled => "unhandled",
             CheckpointOutcome::NoGate => "no-gate",
             CheckpointOutcome::SubmitFailed => "submit-failed",
-            CheckpointOutcome::NotPorted => "not-ported",
         }
+    }
+}
+
+/// The checkpoint runner's result object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckpointReport {
+    pub outcome: CheckpointOutcome,
+    pub attempt: u32,
+    pub score: Option<u64>,
+    pub question_num: Option<u32>,
+}
+
+impl CheckpointReport {
+    pub fn new(outcome: CheckpointOutcome, attempt: u32) -> Self {
+        CheckpointReport { outcome, attempt, score: None, question_num: None }
+    }
+
+    pub fn score(self, score: Option<u64>) -> Self {
+        CheckpointReport { score, ..self }
+    }
+
+    pub fn question_num(self, n: u32) -> Self {
+        CheckpointReport { question_num: Some(n), ..self }
+    }
+
+    pub fn stops_course(&self) -> bool {
+        self.outcome.stops_course()
+    }
+}
+
+impl Report for CheckpointReport {
+    fn status(&self) -> &'static str {
+        self.outcome.status()
+    }
+
+    fn fields(&self) -> Vec<(&'static str, Value)> {
+        let mut fields = vec![("status", json!(self.status())), ("attempt", json!(self.attempt))];
+        if let Some(n) = self.question_num {
+            fields.push(("questionNum", json!(n)));
+        }
+        if let Some(score) = self.score {
+            fields.push(("score", json!(score)));
+        }
+        fields
     }
 }
 
@@ -147,10 +189,10 @@ pub trait ActivityRunners<P> {
 #[allow(async_fn_in_trait)]
 pub trait CourseNodeRunners<P> {
     async fn unit(&mut self, page: &P) -> PageResult<UnitOutcome>;
-    async fn checkpoint(&mut self, page: &P) -> PageResult<CheckpointOutcome>;
+    async fn checkpoint(&mut self, page: &P) -> PageResult<CheckpointReport>;
 }
 
-/// The runners as far as the Rust port goes: every activity runner, no checkpoint yet.
+/// The live runners.
 #[derive(Debug, Clone)]
 pub struct Live {
     pub config: Config,
@@ -166,13 +208,12 @@ impl<P: FramedPage> ActivityRunners<P> for Live {
     }
 }
 
-impl<P: UnitPage> CourseNodeRunners<P> for Live {
+impl<P: UnitPage + checkpoint::CheckpointPage> CourseNodeRunners<P> for Live {
     async fn unit(&mut self, page: &P) -> PageResult<UnitOutcome> {
         unit::run(page, self).await
     }
 
-    async fn checkpoint(&mut self, _page: &P) -> PageResult<CheckpointOutcome> {
-        logger::warn("Checkpoint runner is not ported to Rust yet", []);
-        Ok(CheckpointOutcome::NotPorted)
+    async fn checkpoint(&mut self, page: &P) -> PageResult<CheckpointReport> {
+        checkpoint::run(page, &mut checkpoint::LiveAttempt).await
     }
 }

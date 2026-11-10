@@ -13,10 +13,10 @@ use beelingua::detect::{detect_mode, PageMode};
 use beelingua::logger;
 use beelingua::runners::course::{self, CourseOptions};
 use beelingua::runners::unit::{self, UnitPage};
-use beelingua::runners::{exercise, iframe, reading, Live, Report};
+use beelingua::runners::{checkpoint, exercise, iframe, reading, Live, Report};
 use serde_json::{json, Value};
 
-const USAGE: &str = "usage: beelingua [course|unit|exercise|iframe|reading] [url]
+const USAGE: &str = "usage: beelingua [course|unit|exercise|iframe|reading|checkpoint] [url]
        beelingua attach | open-row \"<row title>\" | eval-frame \"<script>\"
 Env: CDP_PORT (default 9222), BROWSER (chrome|brave|edge), BROWSER_BINARY_PATH, LLM_PROVIDER=codex";
 
@@ -29,6 +29,7 @@ enum RunMode {
     Exercise,
     Iframe,
     Reading,
+    Checkpoint,
 }
 
 impl RunMode {
@@ -39,18 +40,19 @@ impl RunMode {
             "exercise" => Some(RunMode::Exercise),
             "iframe" => Some(RunMode::Iframe),
             "reading" => Some(RunMode::Reading),
+            "checkpoint" => Some(RunMode::Checkpoint),
             _ => None,
         }
     }
 
-    fn from_detected(mode: PageMode) -> Option<RunMode> {
+    fn from_detected(mode: PageMode) -> RunMode {
         match mode {
-            PageMode::Course => Some(RunMode::Course),
-            PageMode::Unit => Some(RunMode::Unit),
-            PageMode::Exercise => Some(RunMode::Exercise),
-            PageMode::Iframe => Some(RunMode::Iframe),
-            PageMode::Reading => Some(RunMode::Reading),
-            PageMode::Checkpoint => None,
+            PageMode::Course => RunMode::Course,
+            PageMode::Unit => RunMode::Unit,
+            PageMode::Exercise => RunMode::Exercise,
+            PageMode::Iframe => RunMode::Iframe,
+            PageMode::Reading => RunMode::Reading,
+            PageMode::Checkpoint => RunMode::Checkpoint,
         }
     }
 }
@@ -81,9 +83,7 @@ fn parse_args(args: &[String]) -> Result<Mode, String> {
         Some("open-row") => second.map(|title| Mode::OpenRow { title }).ok_or_else(|| USAGE.to_string()),
         Some("eval-frame") => second.map(|script| Mode::EvalFrame { script }).ok_or_else(|| USAGE.to_string()),
         Some("-h" | "--help" | "help") => Err(USAGE.to_string()),
-        Some("checkpoint" | "final-test") => {
-            Err("The checkpoint and final-test runners are not ported to Rust yet.".to_string())
-        }
+        Some("final-test") => Err("The final-test runner is not ported to Rust yet.".to_string()),
         Some(arg) => match RunMode::parse(arg) {
             Some(mode) => Ok(Mode::Run { mode: Some(mode), url: second.unwrap_or_else(|| DEFAULT_URL.to_string()) }),
             // Like cli.js, an unknown first argument is the start URL.
@@ -188,6 +188,7 @@ async fn run_mode(mode: RunMode, lms: &Lms, config: &Config) -> Result<Vec<(&'st
         RunMode::Exercise => exercise::run(lms, config).await.map(|o| o.fields()),
         RunMode::Iframe => iframe::run(lms, config).await.map(|o| o.fields()),
         RunMode::Reading => reading::run(lms).await.map(|o| o.fields()),
+        RunMode::Checkpoint => checkpoint::run(lms, &mut checkpoint::LiveAttempt).await.map(|o| o.fields()),
     };
     fields.map_err(|e| e.to_string())
 }
@@ -261,10 +262,10 @@ async fn main() {
             println!("Detecting exercise type...");
             let detected = detect_mode(&lms).await.unwrap_or_else(|e| fail(&e.to_string()));
             let Some(detected) = detected else {
-                fail("Could not auto-detect the exercise type. Run with an explicit mode instead: beelingua <course|unit|exercise|iframe|reading>");
+                fail("Could not auto-detect the exercise type. Run with an explicit mode instead: beelingua <course|unit|exercise|iframe|reading|checkpoint>");
             };
             println!("Detected: {}", detected.name());
-            RunMode::from_detected(detected).unwrap_or_else(|| fail("The checkpoint runner is not ported to Rust yet."))
+            RunMode::from_detected(detected)
         }
     };
 
@@ -295,6 +296,10 @@ mod tests {
         assert_eq!(parse_args(&args(&["https://y"])), Ok(Mode::Run { mode: None, url: "https://y".to_string() }));
         assert_eq!(parse_args(&args(&["open-row", "Reading"])), Ok(Mode::OpenRow { title: "Reading".to_string() }));
         assert!(parse_args(&args(&["open-row"])).is_err());
-        assert!(parse_args(&args(&["checkpoint"])).is_err());
+        assert_eq!(
+            parse_args(&args(&["checkpoint"])),
+            Ok(Mode::Run { mode: Some(RunMode::Checkpoint), url: DEFAULT_URL.to_string() })
+        );
+        assert_eq!(RunMode::from_detected(PageMode::Checkpoint), RunMode::Checkpoint);
     }
 }
