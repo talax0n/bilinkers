@@ -1,9 +1,6 @@
-const { Builder } = require('selenium-webdriver');
-const chrome = require('selenium-webdriver/chrome');
 const fs = require('node:fs');
-const { resolveChromedriverPath } = require('../src/chromedriver');
 const { config } = require('../src/config');
-const { getCurrentQuestionDom } = require('../src/browser');
+const { attachToLms, getCurrentQuestionDom } = require('../src/browser');
 const { createRegistry } = require('../src/questionTypes/registry');
 const audioMultipleChoice = require('../src/questionTypes/audioMultipleChoice');
 const readingComprehension = require('../src/questionTypes/readingComprehension');
@@ -54,7 +51,6 @@ const logger = require('../src/logger');
 // pass, no review hints, no bogus confidence boost) — the file is then
 // overwritten with the new test's own data. You don't need to delete it
 // yourself.
-const CHROMEDRIVER_PATH = process.env.CHROMEDRIVER_PATH;
 const OUTPUT_PATH = './final-test-answers.md';
 const ANSWERS_PATH = './final-test-answers.json';
 
@@ -133,22 +129,6 @@ function buildMarkdown(records) {
       return `## Q${record.number}\n${record.text}\n${optionLines}\n${answered}${conf}\n`;
     })
     .join('\n');
-}
-
-async function attachToBrave() {
-  const options = new chrome.Options();
-  options.debuggerAddress('localhost:9222');
-  const chromedriverPath = CHROMEDRIVER_PATH || (await resolveChromedriverPath());
-  const builder = new Builder().forBrowser('chrome').setChromeOptions(options).setChromeService(new chrome.ServiceBuilder(chromedriverPath));
-  const driver = await builder.build();
-
-  const handles = await driver.getAllWindowHandles();
-  for (const handle of handles) {
-    await driver.switchTo().window(handle);
-    const url = await driver.getCurrentUrl();
-    if (url.includes('lms.binus.ac.id')) return driver;
-  }
-  throw new Error('No lms.binus.ac.id tab found among open Brave windows.');
 }
 
 const ANSWER_INSTRUCTION =
@@ -372,7 +352,7 @@ async function scrapeFinalTest(
 }
 
 async function main(existingDriver) {
-  const driver = existingDriver || (await attachToBrave());
+  const driver = existingDriver || (await attachToLms());
   const llmClient = createClient(config);
 
   const autoAnswer = process.env.FINAL_TEST_AUTO_ANSWER === '1';

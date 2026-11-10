@@ -1,8 +1,5 @@
-const { Builder } = require('selenium-webdriver');
-const chrome = require('selenium-webdriver/chrome');
-const { resolveChromedriverPath } = require('../src/chromedriver');
 const { config } = require('../src/config');
-const { getCurrentQuestionDom } = require('../src/browser');
+const { attachToLms, getCurrentQuestionDom } = require('../src/browser');
 const { createRegistry } = require('../src/questionTypes/registry');
 const audioMultipleChoice = require('../src/questionTypes/audioMultipleChoice');
 const readingComprehension = require('../src/questionTypes/readingComprehension');
@@ -18,10 +15,6 @@ const logger = require('../src/logger');
 // short of 100, up to a safety cap. Run via `node scripts/cli.js
 // checkpoint`, or invoke this file directly if the browser is already up
 // and sitting on a checkpoint's gate page.
-// CHROMEDRIVER_PATH overrides auto-detection below (matches chromedriver to
-// whatever's actually listening on the debug port) — only needed if that
-// fails for your setup.
-const CHROMEDRIVER_PATH = process.env.CHROMEDRIVER_PATH;
 
 // Platform policy is genuinely unlimited attempts, so keep retrying wrong
 // scores forever — only an unhandled question type (a structural gap, not
@@ -30,22 +23,6 @@ const CHROMEDRIVER_PATH = process.env.CHROMEDRIVER_PATH;
 // Per-pill brute-force letters cycle A..F so elimination stays unbounded
 // (unlimited attempts) even in the unlikely event it hasn't converged by F.
 const LETTERS = ['A', 'B', 'C', 'D', 'E', 'F'];
-
-async function attachToBrave() {
-  const options = new chrome.Options();
-  options.debuggerAddress('localhost:9222');
-  const chromedriverPath = CHROMEDRIVER_PATH || (await resolveChromedriverPath());
-  const builder = new Builder().forBrowser('chrome').setChromeOptions(options).setChromeService(new chrome.ServiceBuilder(chromedriverPath));
-  const driver = await builder.build();
-
-  const handles = await driver.getAllWindowHandles();
-  for (const handle of handles) {
-    await driver.switchTo().window(handle);
-    const url = await driver.getCurrentUrl();
-    if (url.includes('lms.binus.ac.id')) return driver;
-  }
-  throw new Error('No lms.binus.ac.id tab found among open Brave windows.');
-}
 
 // The gate button's text isn't fixed: "Start Attempt 1" on a fresh
 // checkpoint, "Start Attempt N" on a later one, or "Continue" if an attempt
@@ -569,7 +546,7 @@ async function runCheckpointAttempt(driver, letter) {
 }
 
 async function main(existingDriver, { runExerciseFn = runCheckpointAttempt } = {}) {
-  const driver = existingDriver || (await attachToBrave());
+  const driver = existingDriver || (await attachToLms());
   const gateUrl = await driver.getCurrentUrl();
 
   // Brute-force blocking: one shared letter per attempt, advancing A -> B ->
@@ -642,4 +619,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { run: main, waitForScore, ensurePillsExpanded, attachToBrave, clickGateButton, clickSaveButton, waitForPillSaved, isPillLocked, clickSubmit, answerAllQuestions, readPills, clickPill };
+module.exports = { run: main, waitForScore, ensurePillsExpanded, clickGateButton, clickSaveButton, waitForPillSaved, isPillLocked, clickSubmit, answerAllQuestions, readPills, clickPill };

@@ -2,9 +2,8 @@ require('dotenv').config();
 const fs = require('fs');
 const { spawn } = require('child_process');
 const readline = require('readline');
-const { Builder, By } = require('selenium-webdriver');
-const chrome = require('selenium-webdriver/chrome');
-const { resolveChromedriverPath } = require('../src/chromedriver');
+const { By } = require('selenium-webdriver');
+const { attachToLms } = require('../src/browser');
 const logger = require('../src/logger');
 const { isGroupedReadingLayout, groupedReadingLayoutFromDocument } = require('./grouped-reading');
 
@@ -100,96 +99,85 @@ function waitForEnter(promptText) {
 //      the "Unit 2" activity list: exactly this shape, no iframe, no
 //      lettered options)
 async function detectMode() {
-  const options = new chrome.Options();
-  options.debuggerAddress('localhost:9222');
-  const chromedriverPath = await resolveChromedriverPath();
-  const driver = await new Builder().forBrowser('chrome').setChromeOptions(options).setChromeService(new chrome.ServiceBuilder(chromedriverPath)).build();
+  const driver = await attachToLms();
 
-  const handles = await driver.getAllWindowHandles();
-  for (const handle of handles) {
-    await driver.switchTo().window(handle);
-    const url = await driver.getCurrentUrl();
-    if (!url.includes('lms.binus.ac.id')) continue;
-
-    await driver.switchTo().defaultContent();
-    const iframes = await driver.findElements(By.css('iframe'));
-    if (iframes.length > 0) {
-      await driver.switchTo().frame(iframes[0]);
-      const iframeHtml = await driver.executeScript('return document.documentElement.outerHTML');
-      if (
-        iframeHtml.includes('quiz-input-sa') ||
-        iframeHtml.includes('quiz-input-radio') ||
-        iframeHtml.includes('quiz-matching') ||
-        /href="#\/n"/.test(iframeHtml)
-      ) {
-        return 'iframe';
-      }
-      // The reading BlExercise (passage + numbered 1..N tiles, lettered
-      // option buttons) is ALSO iframe-embedded, but uses the MUI
-      // 'bl-w-full justify-content-start' option buttons rather than the
-      // Bits player's quiz-input-* markup — so it's distinguished from a
-      // native (top-level) 'exercise' by living inside the iframe.
-      if (iframeHtml.includes('bl-w-full justify-content-start')) {
-        return 'reading';
-      }
-      await driver.switchTo().defaultContent();
+  await driver.switchTo().defaultContent();
+  const iframes = await driver.findElements(By.css('iframe'));
+  if (iframes.length > 0) {
+    await driver.switchTo().frame(iframes[0]);
+    const iframeHtml = await driver.executeScript('return document.documentElement.outerHTML');
+    if (
+      iframeHtml.includes('quiz-input-sa') ||
+      iframeHtml.includes('quiz-input-radio') ||
+      iframeHtml.includes('quiz-matching') ||
+      /href="#\/n"/.test(iframeHtml)
+    ) {
+      return 'iframe';
     }
-
-    const topHtml = await driver.executeScript('return document.documentElement.outerHTML');
-
-    // A checkpoint's gate page ("ENG-B1.2 - INDEPENDENT (V2) - Checkpoint 1",
-    // Total Question/Passing Score/Maximum Attempt, a "Start Attempt N" or
-    // "Continue" button) has the exact same shape as a plain exercise's
-    // BlExercise gate — "Checkpoint" in the heading is the one thing that
-    // tells them apart, so that's the check, not the generic gate markers.
-    const isCheckpointGate = await driver.executeScript(`
-      const hasCheckpointHeading = /Checkpoint/i.test(document.body.textContent);
-      const buttons = Array.from(document.querySelectorAll('button'));
-      const hasGateButton = buttons.some((b) => {
-        const text = b.textContent.trim();
-        return text.startsWith('Start Attempt') || text === 'Continue';
-      });
-      return hasCheckpointHeading && hasGateButton;
-    `);
-    if (isCheckpointGate) {
-      return 'checkpoint';
-    }
-
-    // A course's roadmap (the isometric city map: "Unit 1", "Checkpoint 1",
-    // ... hexagon nodes) renders each node as a rasterized PNG inside a
-    // '.hoverable-pointer' div with a plain-text label sibling — unique to
-    // this page, not shared with the unit/exercise/checkpoint chrome.
-    const isCourseMap = await driver.executeScript(`
-      return [...document.querySelectorAll('.hoverable-pointer')].some((el) =>
-        /^(Unit|Checkpoint)\\d+$/i.test(el.textContent.replace(/\\s+/g, '').trim())
-      );
-    `);
-    if (isCourseMap) {
-      return 'course';
-    }
-
-    const topLevelLayout = await driver.executeScript(`return (${groupedReadingLayoutFromDocument.toString()})()`);
-    if (isGroupedReadingLayout(topLevelLayout)) {
+    // The reading BlExercise (passage + numbered 1..N tiles, lettered
+    // option buttons) is ALSO iframe-embedded, but uses the MUI
+    // 'bl-w-full justify-content-start' option buttons rather than the
+    // Bits player's quiz-input-* markup — so it's distinguished from a
+    // native (top-level) 'exercise' by living inside the iframe.
+    if (iframeHtml.includes('bl-w-full justify-content-start')) {
       return 'reading';
     }
-
-    if (topHtml.includes('bl-w-full justify-content-start')) {
-      return 'exercise';
-    }
-
-    const isUnitList = await driver.executeScript(`
-      const rows = document.querySelectorAll('button.bl-w-full');
-      let titled = 0;
-      rows.forEach((b) => { if (b.querySelector('.bl-text-ellipsis')) titled += 1; });
-      return titled >= 2;
-    `);
-    if (isUnitList) {
-      return 'unit';
-    }
-
-    return null;
+    await driver.switchTo().defaultContent();
   }
-  throw new Error('No lms.binus.ac.id tab found to detect the exercise type from.');
+
+  const topHtml = await driver.executeScript('return document.documentElement.outerHTML');
+
+  // A checkpoint's gate page ("ENG-B1.2 - INDEPENDENT (V2) - Checkpoint 1",
+  // Total Question/Passing Score/Maximum Attempt, a "Start Attempt N" or
+  // "Continue" button) has the exact same shape as a plain exercise's
+  // BlExercise gate — "Checkpoint" in the heading is the one thing that
+  // tells them apart, so that's the check, not the generic gate markers.
+  const isCheckpointGate = await driver.executeScript(`
+    const hasCheckpointHeading = /Checkpoint/i.test(document.body.textContent);
+    const buttons = Array.from(document.querySelectorAll('button'));
+    const hasGateButton = buttons.some((b) => {
+      const text = b.textContent.trim();
+      return text.startsWith('Start Attempt') || text === 'Continue';
+    });
+    return hasCheckpointHeading && hasGateButton;
+  `);
+  if (isCheckpointGate) {
+    return 'checkpoint';
+  }
+
+  // A course's roadmap (the isometric city map: "Unit 1", "Checkpoint 1",
+  // ... hexagon nodes) renders each node as a rasterized PNG inside a
+  // '.hoverable-pointer' div with a plain-text label sibling — unique to
+  // this page, not shared with the unit/exercise/checkpoint chrome.
+  const isCourseMap = await driver.executeScript(`
+    return [...document.querySelectorAll('.hoverable-pointer')].some((el) =>
+      /^(Unit|Checkpoint)\\d+$/i.test(el.textContent.replace(/\\s+/g, '').trim())
+    );
+  `);
+  if (isCourseMap) {
+    return 'course';
+  }
+
+  const topLevelLayout = await driver.executeScript(`return (${groupedReadingLayoutFromDocument.toString()})()`);
+  if (isGroupedReadingLayout(topLevelLayout)) {
+    return 'reading';
+  }
+
+  if (topHtml.includes('bl-w-full justify-content-start')) {
+    return 'exercise';
+  }
+
+  const isUnitList = await driver.executeScript(`
+    const rows = document.querySelectorAll('button.bl-w-full');
+    let titled = 0;
+    rows.forEach((b) => { if (b.querySelector('.bl-text-ellipsis')) titled += 1; });
+    return titled >= 2;
+  `);
+  if (isUnitList) {
+    return 'unit';
+  }
+
+  return null;
 }
 
 async function main() {

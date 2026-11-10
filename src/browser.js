@@ -1,4 +1,37 @@
-const { By } = require('selenium-webdriver');
+const { Builder, By } = require('selenium-webdriver');
+const chrome = require('selenium-webdriver/chrome');
+const { resolveChromedriverPath } = require('./chromedriver');
+
+const LMS_HOST = 'lms.binus.ac.id';
+
+// Attaches to the browser scripts/cli.js launched with --remote-debugging-port=9222
+// and focuses its LMS tab. CHROMEDRIVER_PATH overrides chromedriver auto-detection.
+async function attachToLms() {
+  const options = new chrome.Options();
+  options.debuggerAddress('localhost:9222');
+  const chromedriverPath = process.env.CHROMEDRIVER_PATH || (await resolveChromedriverPath());
+  const driver = await new Builder()
+    .forBrowser('chrome')
+    .setChromeOptions(options)
+    .setChromeService(new chrome.ServiceBuilder(chromedriverPath))
+    .build();
+
+  for (const handle of await driver.getAllWindowHandles()) {
+    await driver.switchTo().window(handle);
+    if ((await driver.getCurrentUrl()).includes(LMS_HOST)) return driver;
+  }
+  throw new Error(`No ${LMS_HOST} tab found in the attached browser.`);
+}
+
+async function waitForUrlChange(driver, previousUrl, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const url = await driver.getCurrentUrl();
+    if (url !== previousUrl) return url;
+    await driver.sleep(200);
+  }
+  return null;
+}
 
 // The LTI player injects its content iframe via JS after load, so it isn't
 // there yet on the first check right after a question/page transition.
@@ -73,4 +106,4 @@ async function goToNextQuestion(driver) {
   `);
 }
 
-module.exports = { getCurrentQuestionDom, goToNextQuestion };
+module.exports = { attachToLms, waitForUrlChange, getCurrentQuestionDom, goToNextQuestion };

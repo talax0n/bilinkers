@@ -1,6 +1,4 @@
-const { Builder } = require('selenium-webdriver');
-const chrome = require('selenium-webdriver/chrome');
-const { resolveChromedriverPath } = require('../src/chromedriver');
+const { attachToLms, waitForUrlChange } = require('../src/browser');
 const logger = require('../src/logger');
 const { run: runUnit } = require('./run-unit');
 const { run: runCheckpoint } = require('./run-checkpoint');
@@ -16,23 +14,6 @@ const { run: runCheckpoint } = require('./run-checkpoint');
 // sitting on a course's roadmap page (the URL with no /session/{id} suffix).
 // Final Test is deliberately never opened — excluded by construction (the
 // node whitelist below only ever matches "Unit N" / "Checkpoint N").
-const CHROMEDRIVER_PATH = process.env.CHROMEDRIVER_PATH;
-
-async function attachToBrave() {
-  const options = new chrome.Options();
-  options.debuggerAddress('localhost:9222');
-  const chromedriverPath = CHROMEDRIVER_PATH || (await resolveChromedriverPath());
-  const builder = new Builder().forBrowser('chrome').setChromeOptions(options).setChromeService(new chrome.ServiceBuilder(chromedriverPath));
-  const driver = await builder.build();
-
-  const handles = await driver.getAllWindowHandles();
-  for (const handle of handles) {
-    await driver.switchTo().window(handle);
-    const url = await driver.getCurrentUrl();
-    if (url.includes('lms.binus.ac.id')) return driver;
-  }
-  throw new Error('No lms.binus.ac.id tab found among open Brave windows.');
-}
 
 // Each roadmap node is a rasterized PNG (hexagon colour/lock-state/checkmark
 // baked into the image itself, verified live: no colour or state ever shows
@@ -108,16 +89,6 @@ async function clickNode(driver, label) {
   );
 }
 
-async function waitForUrlChange(driver, previousUrl, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const url = await driver.getCurrentUrl();
-    if (url !== previousUrl) return url;
-    await driver.sleep(200);
-  }
-  return null;
-}
-
 // existingDriver lets a caller (or a future higher-level orchestrator) drive
 // one continuous browser session; standalone invocation still attaches its
 // own as before. The rest are injectable for testing without a real driver.
@@ -133,7 +104,7 @@ async function main(
     readRetryMs = 5000,
   } = {}
 ) {
-  const driver = existingDriver || (await attachToBrave());
+  const driver = existingDriver || (await attachToLms());
   const courseUrl = await driver.getCurrentUrl();
 
   const attempted = new Set();

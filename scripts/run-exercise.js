@@ -1,13 +1,10 @@
-const { Builder } = require('selenium-webdriver');
-const chrome = require('selenium-webdriver/chrome');
 const { config } = require('../src/config');
-const { getCurrentQuestionDom, goToNextQuestion } = require('../src/browser');
+const { attachToLms, getCurrentQuestionDom, goToNextQuestion } = require('../src/browser');
 const { createRegistry } = require('../src/questionTypes/registry');
 const audioMultipleChoice = require('../src/questionTypes/audioMultipleChoice');
 const readingComprehension = require('../src/questionTypes/readingComprehension');
 const { processQuestion } = require('../src/runner');
 const { createClient, answerQuestion } = require('../src/llm');
-const { resolveChromedriverPath } = require('../src/chromedriver');
 const logger = require('../src/logger');
 
 // This script attaches to an already-running Chromium-based browser (Chrome,
@@ -17,10 +14,6 @@ const logger = require('../src/logger');
 // open, in place. Run via `node scripts/cli.js exercise`, which handles the
 // browser launch + login wait for you, or invoke this file directly if the
 // browser is already up.
-// CHROMEDRIVER_PATH overrides auto-detection below (matches chromedriver to
-// whatever's actually listening on the debug port) — only needed if that
-// fails for your setup.
-const CHROMEDRIVER_PATH = process.env.CHROMEDRIVER_PATH;
 
 // These cycle every option until Check reports correct instead of trusting an
 // LLM guess: audioMultipleChoice can't be answered intelligently (the bot
@@ -28,22 +21,6 @@ const CHROMEDRIVER_PATH = process.env.CHROMEDRIVER_PATH;
 // in-place Check feedback, so exhausting them is cheaper and more reliable
 // than an LLM call.
 const BLAST_TYPES = new Set(['audioMultipleChoice', 'readingComprehension']);
-
-async function attachToBrave() {
-  const options = new chrome.Options();
-  options.debuggerAddress('localhost:9222');
-  const chromedriverPath = CHROMEDRIVER_PATH || (await resolveChromedriverPath());
-  const builder = new Builder().forBrowser('chrome').setChromeOptions(options).setChromeService(new chrome.ServiceBuilder(chromedriverPath));
-  const driver = await builder.build();
-
-  const handles = await driver.getAllWindowHandles();
-  for (const handle of handles) {
-    await driver.switchTo().window(handle);
-    const url = await driver.getCurrentUrl();
-    if (url.includes('lms.binus.ac.id')) return driver;
-  }
-  throw new Error('No lms.binus.ac.id tab found among open Brave windows.');
-}
 
 function blastAnswerFn(options) {
   let attempt = 0;
@@ -134,7 +111,7 @@ async function clickPillNumber(driver, number) {
 // re-attaching its own driver; standalone invocation (via cli.js or `node
 // scripts/run-exercise.js` directly) still attaches its own as before.
 async function main(existingDriver) {
-  const driver = existingDriver || (await attachToBrave());
+  const driver = existingDriver || (await attachToLms());
   const registry = createRegistry();
   registry.register(audioMultipleChoice);
   registry.register(readingComprehension);

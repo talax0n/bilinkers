@@ -1,7 +1,4 @@
-const { Builder } = require('selenium-webdriver');
-const chrome = require('selenium-webdriver/chrome');
-const { getCurrentQuestionDom } = require('../src/browser');
-const { resolveChromedriverPath } = require('../src/chromedriver');
+const { attachToLms, getCurrentQuestionDom } = require('../src/browser');
 const logger = require('../src/logger');
 
 // Brute-forces a Beelingua reading BlExercise (the numbered 1..N tile layout:
@@ -19,30 +16,10 @@ const logger = require('../src/logger');
 //       unanswered-> rgb(127, 202, 212)      (solid teal)
 //       current   -> solid orange
 //   - Submit is gated: the confirm modal says "All answers must be correct
-//     to submit this exercise" and refuses until every tile is teal, so the
-//     loop just keeps fixing wrong tiles until Submit goes through.
-// CHROMEDRIVER_PATH overrides chromedriver auto-detection if needed.
-const CHROMEDRIVER_PATH = process.env.CHROMEDRIVER_PATH;
 
 // A group is keyed by pill and group index, so tried-letter memory survives
 // navigation within one run without colliding on repeated option text.
 const LETTERS = ['A', 'B', 'C', 'D', 'E', 'F'];
-
-async function attachToBrave() {
-  const options = new chrome.Options();
-  options.debuggerAddress('localhost:9222');
-  const chromedriverPath = CHROMEDRIVER_PATH || (await resolveChromedriverPath());
-  const builder = new Builder().forBrowser('chrome').setChromeOptions(options).setChromeService(new chrome.ServiceBuilder(chromedriverPath));
-  const driver = await builder.build();
-
-  const handles = await driver.getAllWindowHandles();
-  for (const handle of handles) {
-    await driver.switchTo().window(handle);
-    const url = await driver.getCurrentUrl();
-    if (url.includes('lms.binus.ac.id')) return driver;
-  }
-  throw new Error('No lms.binus.ac.id tab found among open Brave windows.');
-}
 
 async function readPills(driver) {
   return driver.executeScript(`
@@ -231,7 +208,7 @@ async function readResultAndAdvance(driver) {
 }
 
 async function main(existingDriver) {
-  const driver = existingDriver || (await attachToBrave());
+  const driver = existingDriver || (await attachToLms());
   const tried = new Map();
 
   // Native MUI exercise, no iframe — skip the LTI-oriented 30s default wait.

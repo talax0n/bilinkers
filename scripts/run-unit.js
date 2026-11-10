@@ -1,6 +1,5 @@
-const { Builder, By } = require('selenium-webdriver');
-const chrome = require('selenium-webdriver/chrome');
-const { resolveChromedriverPath } = require('../src/chromedriver');
+const { attachToLms, waitForUrlChange } = require('../src/browser');
+const { By } = require('selenium-webdriver');
 const logger = require('../src/logger');
 const { run: runExercise } = require('./run-exercise');
 const { run: runIframeExercise } = require('./run-iframe-exercise');
@@ -18,26 +17,6 @@ const { isGroupedReadingLayout, groupedReadingLayoutFromDocument } = require('./
 // `node scripts/cli.js unit`, or invoke this file directly if the browser
 // is already up and sitting on a unit's activity-list page (the URL with no
 // /content/{id} suffix).
-// CHROMEDRIVER_PATH overrides auto-detection below (matches chromedriver to
-// whatever's actually listening on the debug port) — only needed if that
-// fails for your setup.
-const CHROMEDRIVER_PATH = process.env.CHROMEDRIVER_PATH;
-
-async function attachToBrave() {
-  const options = new chrome.Options();
-  options.debuggerAddress('localhost:9222');
-  const chromedriverPath = CHROMEDRIVER_PATH || (await resolveChromedriverPath());
-  const builder = new Builder().forBrowser('chrome').setChromeOptions(options).setChromeService(new chrome.ServiceBuilder(chromedriverPath));
-  const driver = await builder.build();
-
-  const handles = await driver.getAllWindowHandles();
-  for (const handle of handles) {
-    await driver.switchTo().window(handle);
-    const url = await driver.getCurrentUrl();
-    if (url.includes('lms.binus.ac.id')) return driver;
-  }
-  throw new Error('No lms.binus.ac.id tab found among open Brave windows.');
-}
 
 // Each row is a plain MUI button with no href (React onClick) — title text
 // lives in its ".bl-text-ellipsis" label, and a locked row carries both the
@@ -96,16 +75,6 @@ async function clickRow(driver, title) {
     return true;
   }
   return false;
-}
-
-async function waitForUrlChange(driver, previousUrl, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const url = await driver.getCurrentUrl();
-    if (url !== previousUrl) return url;
-    await driver.sleep(200);
-  }
-  return null;
 }
 
 // Both native and iframe-backed activities open behind a native top-level
@@ -262,7 +231,7 @@ async function completeMediaActivity(driver) {
 // its own driver; standalone invocation (via cli.js or `node
 // scripts/run-unit.js` directly) still attaches its own as before.
 async function main(existingDriver) {
-  const driver = existingDriver || (await attachToBrave());
+  const driver = existingDriver || (await attachToLms());
   const unitUrl = await driver.getCurrentUrl();
 
   // Titles we've already opened this run. A row that can't be auto-completed

@@ -1,7 +1,6 @@
-const { Builder, By } = require('selenium-webdriver');
-const chrome = require('selenium-webdriver/chrome');
+const { By } = require('selenium-webdriver');
 const { config } = require('../src/config');
-const { getCurrentQuestionDom } = require('../src/browser');
+const { attachToLms, getCurrentQuestionDom } = require('../src/browser');
 const { createRegistry } = require('../src/questionTypes/registry');
 const fillInBlank = require('../src/questionTypes/fillInBlank');
 const errorAnalysis = require('../src/questionTypes/errorAnalysis');
@@ -9,7 +8,6 @@ const vocabularyIntro = require('../src/questionTypes/vocabularyIntro');
 const quizMatching = require('../src/questionTypes/quizMatching');
 const { processQuestion } = require('../src/runner');
 const { createClient, answerQuestion } = require('../src/llm');
-const { resolveChromedriverPath } = require('../src/chromedriver');
 const logger = require('../src/logger');
 
 // errorAnalysis has no entry here — it's answered by brute force
@@ -44,26 +42,6 @@ function buildInstruction(handler, questionData) {
 // here. Run via `node scripts/cli.js iframe`, which handles the browser
 // launch + login wait for you, or invoke this file directly if the browser
 // is already up.
-// CHROMEDRIVER_PATH overrides auto-detection below (matches chromedriver to
-// whatever's actually listening on the debug port) — only needed if that
-// fails for your setup.
-const CHROMEDRIVER_PATH = process.env.CHROMEDRIVER_PATH;
-
-async function attachToBrave() {
-  const options = new chrome.Options();
-  options.debuggerAddress('localhost:9222');
-  const chromedriverPath = CHROMEDRIVER_PATH || (await resolveChromedriverPath());
-  const builder = new Builder().forBrowser('chrome').setChromeOptions(options).setChromeService(new chrome.ServiceBuilder(chromedriverPath));
-  const driver = await builder.build();
-
-  const handles = await driver.getAllWindowHandles();
-  for (const handle of handles) {
-    await driver.switchTo().window(handle);
-    const url = await driver.getCurrentUrl();
-    if (url.includes('lms.binus.ac.id')) return driver;
-  }
-  throw new Error('No lms.binus.ac.id tab found among open Brave windows.');
-}
 
 async function clickContinue(driver) {
   return driver.executeScript(`
@@ -200,7 +178,7 @@ const BRUTE_FORCE_TYPES = new Set(['errorAnalysis']);
 // re-attaching its own driver; standalone invocation (via cli.js or `node
 // scripts/run-iframe-exercise.js` directly) still attaches its own as before.
 async function main(existingDriver) {
-  const driver = existingDriver || (await attachToBrave());
+  const driver = existingDriver || (await attachToLms());
   const registry = createRegistry();
   registry.register(fillInBlank);
   registry.register(errorAnalysis);
