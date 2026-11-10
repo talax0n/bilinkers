@@ -7,7 +7,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 use rune::tok::{self, type_, Family, TextStyle};
-use rune::{col, el, oklch, row, text, App, AppHandle, AppSpec, Color, Cx, El, ScrollSpec, Tx};
+use rune::{col, el, oklch, row, text, App, AppHandle, AppSpec, Chrome, Color, Cx, El, ScrollSpec, Tx};
 use serde_json::{json, Value};
 
 use crate::logger::{self, Event, Level, Sink};
@@ -276,7 +276,11 @@ fn app(mode: &str, events: Arc<Mutex<Receiver<Event>>>) -> App<State> {
     };
     let board = Dashboard::new(mode);
     // Rune reads its own flags from argv by default; the bot's arguments are not for it.
-    App::new(spec).init(move || State { board, events }).args(Vec::<String>::new())
+    App::new(spec)
+        // A standard title bar, so the header never sits under the traffic lights.
+        .chrome(Chrome { full_size_content: false, ..Chrome::DEFAULT })
+        .init(move || State { board, events })
+        .args(Vec::<String>::new())
 }
 
 fn placeholder() -> State {
