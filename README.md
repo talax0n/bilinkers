@@ -55,11 +55,11 @@ cp .env.example .env
 | `OPENAI_MODEL` | Model name to use (defaults to `gpt-4o`) |
 | `GEMINI_API_KEY` | API key for Gemini (used when `LLM_PROVIDER=gemini`) |
 | `GEMINI_MODEL` | Gemini model name (defaults to `gemini-1.5-flash`) |
-| `BROWSER` | `chrome` (default), `firefox`, `edge`, or `safari` — only used by `src/browser.js`'s `createDriver()` (fresh-launch path) |
+| `BROWSER` | `chrome` (default), `brave`, or `edge` — which browser `scripts/cli.js` launches |
 | `BROWSER_BINARY_PATH` | Optional path to a specific browser binary (falls back to `CHROME_BINARY_PATH` for backwards compatibility) |
 
 > [!NOTE]
-> `BROWSER`/`createDriver()` supports any of the four browsers above. **`scripts/run-exercise.js` and `scripts/run-iframe-exercise.js` are Chromium-only** — they attach over CDP to a browser with `--remote-debugging-port=9222`, a protocol Firefox and Safari don't implement. They auto-detect a matching chromedriver by querying the debug port for the browser's actual Chromium version (this matters for Brave, whose own version number differs from its underlying Chromium build) and reusing/downloading a chromedriver for that major version — set `CHROMEDRIVER_PATH` in `.env` to override this if it ever picks wrong.
+> **Every runner is Chromium-only** — they attach over CDP to a browser with `--remote-debugging-port=9222`, a protocol Firefox and Safari don't implement. They auto-detect a matching chromedriver by querying the debug port for the browser's actual Chromium version (this matters for Brave, whose own version number differs from its underlying Chromium build) and reusing/downloading a chromedriver for that major version — set `CHROMEDRIVER_PATH` in `.env` to override this if it ever picks wrong.
 
 ### Finding your browser binary path
 
@@ -109,7 +109,6 @@ npm run iframe      # LTI-embedded activities (fill-in-blank, error analysis, vo
 npm run unit        # a unit's activity list — runs every unfinished row in turn
 npm run checkpoint  # a checkpoint quiz (30 questions, passing score 100) — retries the whole attempt until it passes
 npm run course      # a course's roadmap — runs every unfinished unit/checkpoint node in turn
-npm run level       # the island map — runs every course from B1.1 through C2.2 in turn
 npm run final-test  # scrapes an open Final Test's questions into final-test-answers.md — never clicks an answer, Save, or Submit
 ```
 
@@ -120,7 +119,6 @@ It opens the browser at `https://lms.binus.ac.id` by default (pass a different U
 - `npm run unit` is a level up from the other two: it reads the unit's own row list (skipping anything already checkmarked or still locked), opens the next unfinished row, runs `exercise` or `iframe` against it on the *same* browser session, returns to the list, and repeats until nothing unfinished is left or something can't be auto-solved (in which case it stops there rather than guessing past it, same philosophy as the unhandled-question-type case above).
 - `npm run checkpoint` drives a checkpoint quiz — a bigger (e.g. 30-question), single native exercise sitting behind its own "Start Attempt N"/"Continue" gate, requiring a passing score of 100 with unlimited attempts. It reuses the same native-exercise question loop as `exercise`, and since the platform allows unlimited attempts, automatically retries the whole checkpoint from the gate if a completed attempt scores under 100 — capped at 5 attempts so a structural problem (like an unhandled question type, which stops the run immediately instead of retrying, since a retry would only hit the same wall) can't loop forever.
 - `npm run course` is a level up from `unit`/`checkpoint`: it reads the course roadmap (the "Unit 1, Unit 2, Checkpoint 1, ..." zig-zag map), using the header's "Unit 4/8  CP 1/3" progress counters to find the next unfinished node in course order, opens it, runs `unit` or `checkpoint` against it on the same browser session, returns to the roadmap, and repeats until nothing unfinished is left, a node won't open (locked), or a node inside it gets stuck.
-- `npm run level` is a level up from `course`: it reads the island map (the "B1.1, B1.2, B2.1, B2.2, C1.1, C1.2, C2.1, C2.2" hexagon nodes), opens each course in that fixed order, runs `course` against it on the same browser session, returns to the island map, and repeats until every course from B1.1 through C2.2 has been attempted, a node won't open (locked), or a course inside it gets stuck. Unlike the course roadmap, this page has no progress-counter header, so it relies purely on "does clicking still navigate" to know when it's hit the platform's own unlock frontier.
 
 If multiple `lms.binus.ac.id` tabs are open, detection (and the bot itself) targets whichever one it finds first — close the others first if you want a specific tab picked.
 
@@ -158,19 +156,18 @@ When `npm run bot` / `npm run exercise` / `npm run iframe` is run in a real term
 npm test
 ```
 
-Runs the unit test suite (`bun test`, using Node's built-in `node:test`/`node:assert` APIs — Bun runs those directly) covering the runner, config, LLM wrapper, progress persistence, logger, browser helpers, and question-type registry. There are no automated tests against the live Beelingua site itself, since it requires a real logged-in session — question-type parsers are verified live during development instead.
+Runs the unit test suite (`bun test`, using Node's built-in `node:test`/`node:assert` APIs — Bun runs those directly) covering the runner, config, LLM wrapper, logger, browser helpers, and question-type registry. There are no automated tests against the live Beelingua site itself, since it requires a real logged-in session — question-type parsers are verified live during development instead.
 
 ## Project structure
 
 ```
 src/
-  browser.js           WebDriver setup (chrome/firefox/edge/safari), manual-login wait, DOM/iframe helpers — polls for the iframe on load/transitions, and waits out two transient LTI states (the launcher's auto-submit form, and the Bits player's own empty <main> render window) instead of misreading either as unanswerable content
+  browser.js           DOM/iframe helpers — polls for the iframe on load/transitions, and waits out two transient LTI states (the launcher's auto-submit form, and the Bits player's own empty <main> render window) instead of misreading either as unanswerable content
   chromedriver.js      Resolves a chromedriver matching whatever's actually on the CDP debug port (reuses cached, else downloads)
   config.js             Env-driven config (timeouts, retries, paths)
   dashboard.js         Live OpenTUI view of a run (header, correct/incorrect tally, log feed)
   llm.js                 OpenAI-compatible / Gemini client wrapper
   logger.js             JSON logging + unhandled-question dumps; can redirect to dashboard.js via setSink()
-  progress.js           Resumable lesson/section progress (progress.json)
   runner.js               Core per-question loop: parse → answer → check → retry (tracks every wrong answer tried and rules them out explicitly in the next prompt; retries a failed LLM/proxy call itself before counting it as a wasted attempt; delay between retries)
   questionTypes/
     registry.js          Ordered detect() lookup across registered types

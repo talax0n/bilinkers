@@ -5,15 +5,12 @@
   "type": "commonjs",
   "scripts": {
     "test": "bun test tests/*.test.js",
-    "smoke": "bun scripts/smoke.js",
-    "start": "bun src/runner.js",
     "bot": "bun scripts/cli.js",
     "exercise": "bun scripts/cli.js exercise",
     "iframe": "bun scripts/cli.js iframe",
     "unit": "bun scripts/cli.js unit",
     "checkpoint": "bun scripts/cli.js checkpoint",
     "course": "bun scripts/cli.js course",
-    "level": "bun scripts/cli.js level",
     "final-test": "bun scripts/cli.js final-test"
   },
   "engines": {

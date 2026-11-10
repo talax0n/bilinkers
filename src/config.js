@@ -29,7 +29,6 @@ function buildConfig(env) {
       maxAnswerRetries: parseNonNegativeInteger(env.MAX_ANSWER_RETRIES, 25),
     },
     paths: {
-      progressFile: './progress.json',
       unhandledLogDir: './logs/unhandled',
     },
   };

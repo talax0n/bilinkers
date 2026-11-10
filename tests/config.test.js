@@ -17,7 +17,6 @@ test('buildConfig uses provided model', () => {
 test('buildConfig sets retry and path defaults', () => {
   const cfg = buildConfig({});
   assert.equal(cfg.retry.maxAnswerRetries, 25);
-  assert.equal(cfg.paths.progressFile, './progress.json');
   assert.equal(cfg.paths.unhandledLogDir, './logs/unhandled');
 });
 
