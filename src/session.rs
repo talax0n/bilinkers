@@ -88,7 +88,7 @@ impl RunMode {
     }
 }
 
-pub const DETECT_FAILED: &str = "Could not auto-detect the exercise type. Run with an explicit mode instead: beelingua <course|unit|exercise|iframe|reading|checkpoint>";
+pub const DETECT_FAILED: &str = "Could not auto-detect the exercise type. Run with an explicit mode instead: bilinkers <course|unit|exercise|iframe|reading|checkpoint>";
 
 /// What `.env` selects: BROWSER (default chrome) and where its binary is, or why it isn't there.
 #[derive(Debug, Clone, PartialEq, Eq)]

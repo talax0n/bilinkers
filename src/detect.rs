@@ -34,7 +34,7 @@ impl PageMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageKind {
     Mode(PageMode),
-    /// Final tests run only from the terminal (`beelingua final-test`).
+    /// Final tests run only from the terminal (`bilinkers final-test`).
     FinalTest,
     /// The Beelingua home with the course islands, before a course is opened.
     IslandMap,

@@ -303,9 +303,9 @@ pub const SETTINGS_FILE: &str = "settings.env";
 pub fn settings_path_for(os: &str, var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
     let set = |name: &str| var(name).filter(|v| !v.is_empty()).map(PathBuf::from);
     let dir = match os {
-        "macos" => set("HOME")?.join("Library").join("Application Support").join("Beelingua"),
-        "windows" => set("APPDATA")?.join("Beelingua"),
-        _ => set("XDG_CONFIG_HOME").or_else(|| set("HOME").map(|h| h.join(".config")))?.join("beelingua"),
+        "macos" => set("HOME")?.join("Library").join("Application Support").join("Bilinkers"),
+        "windows" => set("APPDATA")?.join("Bilinkers"),
+        _ => set("XDG_CONFIG_HOME").or_else(|| set("HOME").map(|h| h.join(".config")))?.join("bilinkers"),
     };
     Some(dir.join(SETTINGS_FILE))
 }
@@ -314,8 +314,21 @@ pub fn settings_path() -> Option<PathBuf> {
     settings_path_for(std::env::consts::OS, |name| std::env::var_os(name))
 }
 
-/// The file's entries; a missing or unreadable file has none.
+/// The same file under the bot's old name, Beelingua, for a `settings_path_for` path.
+pub fn legacy_settings_path(path: &Path) -> Option<PathBuf> {
+    let dir = path.parent()?;
+    let old = match dir.file_name()?.to_str()? {
+        "Bilinkers" => "Beelingua",
+        "bilinkers" => "beelingua",
+        _ => return None,
+    };
+    Some(dir.with_file_name(old).join(SETTINGS_FILE))
+}
+
+/// The file's entries; a missing or unreadable file has none. Until the file exists, the one
+/// saved under the old name is read instead.
 pub fn read_settings(path: &Path) -> Vec<(String, String)> {
+    let path = legacy_settings_path(path).filter(|old| !path.exists() && old.exists()).unwrap_or(path.to_path_buf());
     std::fs::read_to_string(path).map(|text| parse_dotenv(&text)).unwrap_or_default()
 }
 
@@ -339,7 +352,7 @@ pub fn save_settings(path: &Path, updates: &[(&str, Option<&str>)]) -> std::io::
     }
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
-    let mut text = String::from("# Saved by the Beelingua Bot window. .env and the environment win over this file.\n");
+    let mut text = String::from("# Saved by the Bilinkers window. .env and the environment win over this file.\n");
     for (key, value) in &entries {
         text.push_str(&format!("{key}={}\n", quote(value)));
     }
@@ -482,7 +495,7 @@ mod tests {
     fn a_missing_codex_binary_is_missing_not_signed_out() {
         let missing = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
         assert_eq!(CodexStatus::from_output(Err(missing)), CodexStatus::Missing);
-        let spawned = Command::new("/nonexistent/beelingua-test/codex").arg("login").output();
+        let spawned = Command::new("/nonexistent/bilinkers-test/codex").arg("login").output();
         assert_eq!(CodexStatus::from_output(spawned), CodexStatus::Missing);
         let denied = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
         assert_eq!(CodexStatus::from_output(Err(denied)), CodexStatus::Failed("denied".into()));
@@ -612,19 +625,19 @@ mod tests {
         };
         assert_eq!(
             settings_path_for("macos", vars(&[("HOME", "/Users/u")])),
-            Some(PathBuf::from("/Users/u/Library/Application Support/Beelingua/settings.env"))
+            Some(PathBuf::from("/Users/u/Library/Application Support/Bilinkers/settings.env"))
         );
         assert_eq!(
             settings_path_for("windows", vars(&[("APPDATA", r"C:\Users\u\AppData\Roaming")])),
-            Some(PathBuf::from(r"C:\Users\u\AppData\Roaming").join("Beelingua").join("settings.env"))
+            Some(PathBuf::from(r"C:\Users\u\AppData\Roaming").join("Bilinkers").join("settings.env"))
         );
         assert_eq!(
             settings_path_for("linux", vars(&[("XDG_CONFIG_HOME", "/x"), ("HOME", "/home/u")])),
-            Some(PathBuf::from("/x/beelingua/settings.env"))
+            Some(PathBuf::from("/x/bilinkers/settings.env"))
         );
         assert_eq!(
             settings_path_for("linux", vars(&[("XDG_CONFIG_HOME", ""), ("HOME", "/home/u")])),
-            Some(PathBuf::from("/home/u/.config/beelingua/settings.env"))
+            Some(PathBuf::from("/home/u/.config/bilinkers/settings.env"))
         );
         assert_eq!(settings_path_for("macos", vars(&[])), None);
     }
@@ -656,7 +669,7 @@ mod tests {
     }
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("beelingua-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("bilinkers-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -684,6 +697,30 @@ mod tests {
             .collect();
         assert_eq!(leftovers, vec![SETTINGS_FILE.to_string()], "no temp file is left behind");
         assert_eq!(read_settings(&dir.join("absent.env")), vec![]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_old_beelingua_settings_are_read_until_the_new_file_exists() {
+        let dir = temp_dir("legacy");
+        let (old, new) = (dir.join("beelingua").join(SETTINGS_FILE), dir.join("bilinkers").join(SETTINGS_FILE));
+        assert_eq!(legacy_settings_path(&new), Some(old.clone()));
+        let mac = Path::new("/Users/u/Library/Application Support/Bilinkers/settings.env");
+        assert_eq!(
+            legacy_settings_path(mac),
+            Some(PathBuf::from("/Users/u/Library/Application Support/Beelingua/settings.env"))
+        );
+        assert_eq!(legacy_settings_path(&dir.join("nested").join(SETTINGS_FILE)), None);
+        save_settings(&old, &[("BROWSER", Some("brave"))]).unwrap();
+        assert_eq!(read_settings(&new), pairs(&[("BROWSER", "brave")]));
+        save_settings(&new, &[("CDP_PORT", Some("9333"))]).unwrap();
+        assert_eq!(
+            read_settings(&new),
+            pairs(&[("BROWSER", "brave"), ("CDP_PORT", "9333")]),
+            "the first save keeps them"
+        );
+        save_settings(&old, &[("BROWSER", Some("edge"))]).unwrap();
+        assert_eq!(read_settings(&new)[0], ("BROWSER".to_string(), "brave".to_string()), "the new file wins");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

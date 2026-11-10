@@ -22,7 +22,7 @@ fn header(screen: &str, setup: Option<El>, t: &tok::Theme) -> El {
         .h(30.0)
         .center_y()
         .gap(8.0)
-        .child(text("Beelingua Bot").font(HEADING).color(t.text))
+        .child(text("Bilinkers").font(HEADING).color(t.text))
         .child(text(screen.to_string()).key("screen").font(SUBHEADING).color(t.text_secondary))
         .child(el().grow(1.0));
     if let Some(setup) = setup {

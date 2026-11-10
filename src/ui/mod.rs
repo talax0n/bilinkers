@@ -234,7 +234,7 @@ pub fn run(info: StartInfo, host: Arc<dyn Host>) -> Result<(), String> {
     let (sender, receiver) = mpsc::channel();
     let shared = Arc::new(Mutex::new(Some(receiver)));
     let take = shared.clone();
-    let app = app(AppSpec::new("Beelingua Bot", SIZE, demo::placeholder, view), move || {
+    let app = app(AppSpec::new("Bilinkers", SIZE, demo::placeholder, view), move || {
         let events = take.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_else(|| mpsc::channel().1);
         new_ui(info, host, events)
     });
@@ -263,7 +263,7 @@ pub fn display_available() -> bool {
 /// flags (`--scene home`, `--snap out.png`, `--script s.json`, `--tree tree.json`, `--theme light`).
 pub fn render_headless(rune_args: Vec<String>) {
     let (sender, receiver) = mpsc::channel();
-    let spec = AppSpec { scenes: demo::SCENES, ..AppSpec::new("Beelingua Bot", SIZE, demo::placeholder, view) };
+    let spec = AppSpec { scenes: demo::SCENES, ..AppSpec::new("Bilinkers", SIZE, demo::placeholder, view) };
     let app = app(spec, move || new_ui(demo::info(), Arc::new(demo::FakeHost::default()), receiver)).args(rune_args);
     logger::set_sink(Some(Box::new(ChannelSink { events: sender, window: app.handle() })));
     app.run();

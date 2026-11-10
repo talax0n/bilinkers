@@ -133,7 +133,7 @@ impl CodexClient {
 
     /// Runs `codex exec` with the prompt on stdin and returns its last message.
     pub async fn ask(&self, prompt: &str) -> Result<String, LlmError> {
-        let dir = TempDir::new("beelingua-codex-").map_err(|e| LlmError::Failed(format!("codex exec failed: {e}")))?;
+        let dir = TempDir::new("bilinkers-codex-").map_err(|e| LlmError::Failed(format!("codex exec failed: {e}")))?;
         let out = dir.0.join("answer.txt");
         let args = self.args(&dir.0, &out);
         let (program, path) = crate::setup::codex_program();

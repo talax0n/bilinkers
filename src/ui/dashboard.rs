@@ -151,7 +151,7 @@ pub fn view(board: &Dashboard, action: El, t: &tok::Theme, tones: &Tones) -> El 
         .w_full()
         .center_y()
         .gap(8.0)
-        .child(text("Beelingua Bot").font(HEADING).color(t.text))
+        .child(text("Bilinkers").font(HEADING).color(t.text))
         .child(text(board.mode.clone()).key("mode").font(SUBHEADING).color(t.text_secondary))
         .child(el().grow(1.0))
         .child(status)

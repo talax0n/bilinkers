@@ -57,7 +57,7 @@ A Final Test allows exactly one attempt, so `final-test` is careful by default:
 
 ## Configuration
 
-Set these in the environment or in `.env`. Bilinkers reads the environment first, then `.env`, then the window's `settings.env` (`~/Library/Application Support/Beelingua/` on macOS, `%APPDATA%\Beelingua\` on Windows, `~/.config/beelingua/` on Linux). The first one that sets a key wins.
+Set these in the environment or in `.env`. Bilinkers reads the environment first, then `.env`, then the window's `settings.env` (`~/Library/Application Support/Bilinkers/` on macOS, `%APPDATA%\Bilinkers\` on Windows, `~/.config/bilinkers/` on Linux). The first one that sets a key wins.
 
 | Variable | Meaning | Default |
 |---|---|---|

@@ -231,7 +231,7 @@ pub fn view(flow: &Flow, t: &tok::Theme, tones: &Tones) -> El {
         .w_full()
         .center_y()
         .gap(8.0)
-        .child(text("Beelingua Bot").font(HEADING).color(t.text))
+        .child(text("Bilinkers").font(HEADING).color(t.text))
         .child(text("Welcome").key("screen").font(SUBHEADING).color(t.text_secondary));
     let intro = col()
         .gap(4.0)

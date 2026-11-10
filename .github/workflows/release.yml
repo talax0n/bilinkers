@@ -14,11 +14,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: cargo build --release --locked
-      - run: Copy-Item target/release/beelingua.exe beelingua-windows-x64.exe
+      - run: Copy-Item target/release/bilinkers.exe bilinkers-windows-x64.exe
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: beelingua-windows-x64.exe
+          path: bilinkers-windows-x64.exe
 
   macos:
     runs-on: macos-latest
@@ -30,15 +30,15 @@ jobs:
       - name: Package universal dmg
         run: |
           mkdir dmg
-          lipo -create -output dmg/beelingua \
-            target/aarch64-apple-darwin/release/beelingua \
-            target/x86_64-apple-darwin/release/beelingua
+          lipo -create -output dmg/bilinkers \
+            target/aarch64-apple-darwin/release/bilinkers \
+            target/x86_64-apple-darwin/release/bilinkers
           cp .env.example dmg/
-          hdiutil create -volname beelingua -srcfolder dmg -format UDZO beelingua-macos-universal.dmg
+          hdiutil create -volname Bilinkers -srcfolder dmg -format UDZO bilinkers-macos-universal.dmg
       - uses: actions/upload-artifact@v4
         with:
           name: macos
-          path: beelingua-macos-universal.dmg
+          path: bilinkers-macos-universal.dmg
 
   release:
     if: startsWith(github.ref, 'refs/tags/')
@@ -48,6 +48,6 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
-      - run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes beelingua-windows-x64.exe beelingua-macos-universal.dmg
+      - run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes bilinkers-windows-x64.exe bilinkers-macos-universal.dmg
         env:
           GH_TOKEN: ${{ github.token }}

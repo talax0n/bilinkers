@@ -1,19 +1,19 @@
-//! Port of `src/cli.js`: `beelingua [mode] [url]`. Launches the browser with a debug port
+//! Port of `src/cli.js`: `bilinkers [mode] [url]`. Launches the browser with a debug port
 //! unless one already answers, then attaches and runs the mode, auto-detected when omitted.
 
 use std::collections::HashMap;
 use std::io::{BufRead, IsTerminal, Write};
 use std::time::Duration;
 
-use beelingua::browser::{attach_to_lms, Driver, FramedPage, Lms};
-use beelingua::config::build_config;
-use beelingua::detect::detect_mode;
-use beelingua::runners::unit::UnitPage;
-use beelingua::session::{ensure_browser, run_and_report, wait_for_port, Launch, RunMode, DETECT_FAILED};
-use beelingua::setup::{settings_path, EnvLayers};
+use bilinkers::browser::{attach_to_lms, Driver, FramedPage, Lms};
+use bilinkers::config::build_config;
+use bilinkers::detect::detect_mode;
+use bilinkers::runners::unit::UnitPage;
+use bilinkers::session::{ensure_browser, run_and_report, wait_for_port, Launch, RunMode, DETECT_FAILED};
+use bilinkers::setup::{settings_path, EnvLayers};
 
-const USAGE: &str = "usage: beelingua [--no-ui] [course|unit|exercise|iframe|reading|checkpoint|final-test] [url]
-       beelingua attach | open-row \"<row title>\" | eval-frame \"<script>\" | ui-demo <rune flags>
+const USAGE: &str = "usage: bilinkers [--no-ui] [course|unit|exercise|iframe|reading|checkpoint|final-test] [url]
+       bilinkers attach | open-row \"<row title>\" | eval-frame \"<script>\" | ui-demo <rune flags>
 Env: CDP_PORT (default 9222), BROWSER (chrome|brave|edge), BROWSER_BINARY_PATH, LLM_PROVIDER=codex
 Settings are read from the environment, then ./.env, then the window's settings.env.
 On a terminal with a display a run opens a window that signs in, picks the browser and starts
@@ -116,7 +116,7 @@ fn wants_ui(no_ui: bool, env: &HashMap<String, String>, stdout_is_terminal: bool
 
 #[cfg(feature = "ui")]
 fn display_available() -> bool {
-    beelingua::ui::display_available()
+    bilinkers::ui::display_available()
 }
 
 #[cfg(not(feature = "ui"))]
@@ -179,14 +179,14 @@ mod window {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use beelingua::config::Config;
-    use beelingua::session::{
+    use bilinkers::config::Config;
+    use bilinkers::session::{
         ensure_browser, BrowserSetup, Connection, RunHandle, RunMode, Sighting, Watcher, STOPPED,
     };
-    use beelingua::setup::{
+    use bilinkers::setup::{
         codex_status, save_settings, search_this_machine, spawn_codex_login, BrowserPick, CodexStatus, EnvLayers,
     };
-    use beelingua::ui::{BrowserStep, Host, StartInfo};
+    use bilinkers::ui::{BrowserStep, Host, StartInfo};
 
     /// The window's way to Codex, the browser and the bot: everything slow runs on other threads.
     struct LiveHost {
@@ -328,7 +328,7 @@ mod window {
             watcher: Mutex::new(Watcher::default()),
             login: Mutex::new(None),
         });
-        let result = beelingua::ui::run(info, host.clone());
+        let result = bilinkers::ui::run(info, host.clone());
         host.kill_login();
         result?;
         let mut runs = host.run.lock().unwrap_or_else(|e| e.into_inner());
@@ -352,7 +352,7 @@ fn main() {
     });
     #[cfg(feature = "ui")]
     if let Mode::UiDemo { rune_args } = mode {
-        beelingua::ui::render_headless(rune_args);
+        bilinkers::ui::render_headless(rune_args);
         return;
     }
     #[cfg(not(feature = "ui"))]
