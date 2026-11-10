@@ -6,3 +6,4 @@ pub mod js;
 pub mod llm;
 pub mod question_types;
 pub mod strategy;
+pub mod browser;
