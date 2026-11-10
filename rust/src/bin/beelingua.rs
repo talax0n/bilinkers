@@ -100,12 +100,14 @@ fn cdp_answers(port: u16) -> bool {
         return false;
     };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    if stream.write_all(b"GET /json/version HTTP/1.0\r\nHost: localhost\r\n\r\n").is_err() {
+    // The DevTools server ignores HTTP/1.0 and keeps 1.1 connections open, so read only the first chunk.
+    let request = format!("GET /json/version HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(request.as_bytes()).is_err() {
         return false;
     }
-    let mut response = String::new();
-    let _ = stream.read_to_string(&mut response);
-    response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200")
+    let mut response = [0u8; 64];
+    let n = stream.read(&mut response).unwrap_or(0);
+    response[..n].starts_with(b"HTTP/1.1 200")
 }
 
 /// cli.js resolveBinaryPath: BROWSER_BINARY_PATH (or CHROME_BINARY_PATH), else the platform default.

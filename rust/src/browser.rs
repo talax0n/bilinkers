@@ -55,6 +55,8 @@ pub async fn attach_to_lms(port: u16) -> Result<Lms, AttachError> {
     for page in pages {
         let url = page.url().await.ok().flatten().unwrap_or_default();
         if url.contains(LMS_HOST) {
+            // Pointer events stall on a background tab, and switchTo().window() activated it too.
+            page.bring_to_front().await.map_err(|e| AttachError::Connect(e.to_string()))?;
             return Ok(Lms { browser, page, frames: FrameEvaluator::default(), _events: events });
         }
         urls.push(url);
