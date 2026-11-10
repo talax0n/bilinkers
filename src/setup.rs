@@ -53,6 +53,8 @@ impl CodexStatus {
 /// Where `codex` is: the first hit on `path_var`, then the usual install places a Finder or
 /// Start menu launch leaves off PATH, then the copy the window installed in `app_bin`. That copy
 /// comes last because it never updates itself, so an install the user manages always wins.
+/// An npm `codex.cmd` that cannot reach `node` is passed over, so the search falls through to
+/// the app's own `codex.exe`, or comes back empty and the window offers to install one.
 pub fn find_codex(
     path_var: Option<&OsStr>,
     home: Option<&Path>,
@@ -61,6 +63,7 @@ pub fn find_codex(
 ) -> Option<PathBuf> {
     let names: &[&str] = if cfg!(windows) { &["codex.exe", "codex.cmd"] } else { &["codex"] };
     let mut dirs: Vec<PathBuf> = path_var.map(|p| std::env::split_paths(p).collect()).unwrap_or_default();
+    let path_dirs = dirs.clone();
     if cfg!(windows) {
         dirs.extend(std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("npm")));
     } else {
@@ -70,7 +73,19 @@ pub fn find_codex(
         }
     }
     dirs.extend(app_bin.map(Path::to_path_buf));
-    dirs.iter().flat_map(|dir| names.iter().map(move |name| dir.join(name))).find(|path| exists(path))
+    dirs.iter()
+        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
+        .find(|path| exists(path) && runnable(path, &path_dirs, &exists))
+}
+
+/// npm's `codex.cmd` runs the `node.exe` beside it, else the first one on PATH. A Node from
+/// nvm-windows, fnm or Volta is often on PATH only inside a terminal, not for an Explorer launch,
+/// where the shim fails with "'node' is not recognized".
+fn runnable(program: &Path, path_dirs: &[PathBuf], exists: &impl Fn(&Path) -> bool) -> bool {
+    if program.extension() != Some(OsStr::new("cmd")) {
+        return true;
+    }
+    program.parent().into_iter().chain(path_dirs.iter().map(PathBuf::as_path)).any(|dir| exists(&dir.join("node.exe")))
 }
 
 /// The program to run for `codex` and a PATH that also has its folder, so an npm install finds
@@ -568,6 +583,17 @@ mod tests {
             Some(PathBuf::from("/opt/homebrew/bin/codex")),
             "the user's own install wins over the app's copy"
         );
+    }
+
+    #[test]
+    fn an_npm_shim_without_node_is_not_runnable() {
+        let shim = Path::new("/npm/codex.cmd");
+        let on_path = [PathBuf::from("/nodejs")];
+        let files = |hits: &'static [&'static str]| move |p: &Path| hits.iter().any(|h| p == Path::new(h));
+        assert!(!runnable(shim, &on_path, &files(&[])), "no node anywhere");
+        assert!(runnable(shim, &on_path, &files(&["/nodejs/node.exe"])), "node on PATH");
+        assert!(runnable(shim, &[], &files(&["/npm/node.exe"])), "node beside the shim");
+        assert!(runnable(Path::new("/bin/codex.exe"), &[], &files(&[])), "a native codex needs no node");
     }
 
     type Vars = Vec<(&'static str, OsString)>;
