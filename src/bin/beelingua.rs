@@ -16,8 +16,9 @@ const USAGE: &str = "usage: beelingua [--no-ui] [course|unit|exercise|iframe|rea
        beelingua attach | open-row \"<row title>\" | eval-frame \"<script>\" | ui-demo <rune flags>
 Env: CDP_PORT (default 9222), BROWSER (chrome|brave|edge), BROWSER_BINARY_PATH, LLM_PROVIDER=codex
 Settings are read from the environment, then ./.env, then the window's settings.env.
-On a terminal with a display a run opens a window to pick the mode and start; --no-ui or NO_TUI=1
-keeps the terminal prompts and prints JSON lines.
+On a terminal with a display a run opens a window that signs in, picks the browser and starts
+on the page you open; --no-ui or NO_TUI=1 keeps the terminal prompts and prints JSON lines.
+final-test always runs in the terminal.
 final-test is read-only unless FINAL_TEST_AUTO_ANSWER=1 or FINAL_TEST_GUESS_LISTENING=1
 (FINAL_TEST_CONFIDENCE_THRESHOLD, FINAL_TEST_REVIEWS_REQUIRED). It never clicks Submit.";
 
@@ -173,20 +174,32 @@ async fn prepare(mode: Mode, env: &HashMap<String, String>, port: u16) -> Option
 #[cfg(feature = "ui")]
 mod window {
     use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::process::Child;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use beelingua::config::Config;
-    use beelingua::session::{ensure_browser, BrowserSetup, Connection, RunHandle, RunMode, STOPPED};
-    use beelingua::ui::{Host, StartInfo};
+    use beelingua::session::{
+        ensure_browser, BrowserSetup, Connection, RunHandle, RunMode, Sighting, Watcher, STOPPED,
+    };
+    use beelingua::setup::{
+        codex_status, installed_browsers, save_settings, spawn_codex_login, BrowserPick, CodexStatus, EnvLayers,
+    };
+    use beelingua::ui::{BrowserStep, Host, StartInfo};
 
-    /// The window's way to the browser and the bot: probes, launches and runs on other threads.
+    /// The window's way to Codex, the browser and the bot: everything slow runs on other threads.
     struct LiveHost {
         runtime: tokio::runtime::Handle,
         port: u16,
         url: String,
-        env: HashMap<String, String>,
+        settings: Option<PathBuf>,
+        /// Reread when the browser choice changes.
+        env: Mutex<HashMap<String, String>>,
         config: Config,
         run: Mutex<Runs>,
+        watcher: Mutex<Watcher>,
+        login: Mutex<Option<Child>>,
     }
 
     #[derive(Default)]
@@ -203,20 +216,86 @@ mod window {
         }
     }
 
+    fn browser_step(layers: &EnvLayers) -> BrowserStep {
+        let installed = installed_browsers(std::env::consts::OS, Path::exists);
+        BrowserStep::new(installed, BrowserSetup::from_env(&layers.merged()), layers.browser_locked_by())
+    }
+
+    impl LiveHost {
+        fn reload(&self) -> BrowserStep {
+            let layers = EnvLayers::load(self.settings.as_deref());
+            *self.env.lock().unwrap_or_else(|e| e.into_inner()) = layers.merged();
+            browser_step(&layers)
+        }
+
+        fn kill_login(&self) {
+            if let Some(mut child) = self.login.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
     impl Host for LiveHost {
+        fn codex_status(&self) -> CodexStatus {
+            codex_status()
+        }
+
+        fn sign_in(&self) -> Result<(), String> {
+            let child = spawn_codex_login().map_err(|e| format!("Codex could not start: {e}"))?;
+            *self.login.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
+            loop {
+                std::thread::sleep(Duration::from_millis(200));
+                let mut login = self.login.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(child) = login.as_mut() else {
+                    return Err("Sign-in was cancelled.".into());
+                };
+                match child.try_wait() {
+                    Ok(None) => continue,
+                    Ok(Some(status)) => {
+                        login.take();
+                        return if status.success() { Ok(()) } else { Err(format!("Codex exited with {status}.")) };
+                    }
+                    Err(e) => {
+                        login.take();
+                        return Err(e.to_string());
+                    }
+                }
+            }
+        }
+
+        fn browsers(&self) -> BrowserStep {
+            self.reload()
+        }
+
+        fn save_browser(&self, pick: &BrowserPick) -> Result<BrowserStep, String> {
+            let path = self.settings.as_deref().ok_or("No settings folder is known for this computer.")?;
+            let lines = pick.settings();
+            let updates: Vec<(&str, Option<&str>)> = lines.iter().map(|(k, v)| (*k, v.as_deref())).collect();
+            save_settings(path, &updates).map_err(|e| format!("Could not save to {}: {e}", path.display()))?;
+            Ok(self.reload())
+        }
+
         fn probe(&self) -> Connection {
             Connection::probe(self.port)
         }
 
         fn open_browser(&self) -> Result<(), String> {
-            ensure_browser(&self.env, self.port, &self.url).map(|_| ())
+            let env = self.env.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            ensure_browser(&env, self.port, &self.url).map(|_| ())
         }
 
-        fn start(&self, mode: Option<RunMode>) {
+        fn watch(&self, classify: bool) -> Sighting {
+            let mut watcher = self.watcher.lock().unwrap_or_else(|e| e.into_inner());
+            self.runtime.block_on(watcher.look(self.port, classify))
+        }
+
+        fn start(&self, mode: RunMode) {
             let mut runs = self.run.lock().unwrap_or_else(|e| e.into_inner());
             runs.reap();
-            let (config, env) = (self.config.clone(), self.env.clone());
-            runs.current = Some(RunHandle::spawn(self.runtime.clone(), self.port, mode, config, env));
+            let config = self.config.clone();
+            let env = self.env.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            runs.current = Some(RunHandle::spawn(self.runtime.clone(), self.port, Some(mode), config, env));
         }
 
         fn stop(&self) {
@@ -229,26 +308,29 @@ mod window {
     /// Runs the window until it closes; the last run's exit code, or why no window opened.
     pub fn run(
         runtime: &tokio::runtime::Runtime,
-        preselect: Option<RunMode>,
+        preset: Option<RunMode>,
         url: &str,
-        env: HashMap<String, String>,
+        settings: Option<PathBuf>,
         config: Config,
         port: u16,
     ) -> Result<i32, String> {
-        let info = StartInfo {
-            preselect,
-            browser: BrowserSetup::from_env(&env),
-            auto_answer: env.get("FINAL_TEST_AUTO_ANSWER").is_some_and(|v| v == "1"),
-        };
+        let layers = EnvLayers::load(settings.as_deref());
+        // Checked before the window opens, so it opens on the right screen.
+        let info = StartInfo { codex: codex_status(), browser: browser_step(&layers), preset };
         let host = Arc::new(LiveHost {
             runtime: runtime.handle().clone(),
             port,
             url: url.to_string(),
-            env,
+            settings,
+            env: Mutex::new(layers.merged()),
             config,
             run: Mutex::new(Runs::default()),
+            watcher: Mutex::new(Watcher::default()),
+            login: Mutex::new(None),
         });
-        beelingua::ui::run(info, host.clone())?;
+        let result = beelingua::ui::run(info, host.clone());
+        host.kill_login();
+        result?;
         let mut runs = host.run.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(run) = runs.current.as_mut().filter(|run| !run.is_finished()) {
             eprintln!("Window closed; stopping the run.");
@@ -277,15 +359,17 @@ fn main() {
     if let Mode::UiDemo { .. } = mode {
         fail("ui-demo needs the ui feature");
     }
-    let env = EnvLayers::load(settings_path().as_deref()).merged();
+    let settings = settings_path();
+    let env = EnvLayers::load(settings.as_deref()).merged();
     let config = build_config(&env);
     let port = env.get("CDP_PORT").and_then(|p| p.parse().ok()).unwrap_or(9222);
 
     let runtime = tokio::runtime::Runtime::new().unwrap_or_else(|e| fail(&format!("Could not start tokio: {e}")));
-    let ui = wants_ui(no_ui, &env, std::io::stdout().is_terminal(), display_available());
+    let final_test = matches!(mode, Mode::Run { mode: Some(RunMode::FinalTest), .. });
+    let ui = !final_test && wants_ui(no_ui, &env, std::io::stdout().is_terminal(), display_available());
     #[cfg(feature = "ui")]
-    if let (true, Mode::Run { mode: preselect, url }) = (ui, &mode) {
-        match window::run(&runtime, *preselect, url, env.clone(), config.clone(), port) {
+    if let (true, Mode::Run { mode: preset, url }) = (ui, &mode) {
+        match window::run(&runtime, *preset, url, settings.clone(), config.clone(), port) {
             Ok(code) => std::process::exit(code),
             Err(e) => eprintln!("No window ({e}); using the terminal instead."),
         }
