@@ -6,6 +6,10 @@ edition = "2021"
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = ["ui"]
+ui = ["dep:rune"]
+
 [dependencies]
 chromiumoxide = "0.9.1"
 futures = "0.3"
@@ -13,3 +17,5 @@ regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "io-util", "sync"] }
+# Pre-release GPU UI for the desktop dashboard; pinned to a dev commit because dev is never rewritten.
+rune = { git = "https://github.com/anomalyco/rune", rev = "70eff81165e9854834a75f17753edb6c96ab2ab7", default-features = false, optional = true }

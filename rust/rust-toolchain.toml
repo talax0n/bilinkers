@@ -1,0 +1,4 @@
+[toolchain]
+# Rune uses features stabilised after 1.92 and pins this release itself.
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
