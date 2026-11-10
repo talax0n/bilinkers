@@ -4,9 +4,10 @@ What the bot knows about lms.binus.ac.id and the Beelingua course pages. Most fa
 
 ## Browser attach
 
-- The binary launches the browser with `--remote-debugging-port=9222` and the start URL (default `https://lms.binus.ac.id`) unless the debug port already answers. The user logs in, opens the page, and presses Enter. (src/bin/beelingua.rs)
+- The binary launches the browser with `--remote-debugging-port=9222` and the start URL (default `https://lms.binus.ac.id`) unless the debug port already answers. The user logs in, opens the page, and presses Start in the window (or Enter in the terminal with `--no-ui`). The window's Open browser button does the same launch. (src/session.rs, ensure_browser)
+- The window polls `/json/list` about once a second, which lists tabs without opening or focusing any, and enables Start once a page target's URL contains `lms.binus.ac.id`. (src/session.rs, Connection::probe)
 - The bot talks CDP directly through chromiumoxide, so no chromedriver is needed. It uses the first tab whose URL contains `lms.binus.ac.id` and brings it to front. Pointer clicks hang in a background tab. (src/browser.rs, attach_to_lms)
-- The DevTools HTTP endpoint only answers HTTP/1.1 probes. (src/bin/beelingua.rs)
+- The DevTools HTTP endpoint only answers HTTP/1.1 probes and may keep the connection open, so a probe reads up to Content-Length. (src/session.rs)
 - The activity iframe is cross-origin, so it is its own CDP target. The bot attaches to it by the iframe's frame id (which is its target id) and looks it up fresh on every call, so a reloaded iframe is picked up. It reattaches only when the connection drops, never when a script throws, so a click never runs twice. (src/frame.rs)
 - CDP attach works only with Chromium browsers (Chrome, Brave, Edge).
 
