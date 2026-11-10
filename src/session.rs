@@ -12,9 +12,9 @@ use serde_json::{json, Value};
 use tokio::sync::oneshot;
 
 use crate::browser::{attach_to_lms, open_lms, Driver, Lms};
-use crate::devtools::{http_get, page_tabs, ListedTab};
 use crate::config::Config;
 use crate::detect::{classify_page, detect_mode, PageKind, PageMode};
+use crate::devtools::{http_get, page_tabs, ListedTab};
 use crate::logger;
 use crate::runners::course::{self, CourseOptions};
 use crate::runners::island::{self, IslandOptions};

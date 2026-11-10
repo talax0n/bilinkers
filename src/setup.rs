@@ -51,8 +51,14 @@ impl CodexStatus {
 }
 
 /// Where `codex` is: the first hit on `path_var`, then the usual install places a Finder or
-/// Start menu launch leaves off PATH.
-pub fn find_codex(path_var: Option<&OsStr>, home: Option<&Path>, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+/// Start menu launch leaves off PATH, then the copy the window installed in `app_bin`. That copy
+/// comes last because it never updates itself, so an install the user manages always wins.
+pub fn find_codex(
+    path_var: Option<&OsStr>,
+    home: Option<&Path>,
+    app_bin: Option<&Path>,
+    exists: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
     let names: &[&str] = if cfg!(windows) { &["codex.exe", "codex.cmd"] } else { &["codex"] };
     let mut dirs: Vec<PathBuf> = path_var.map(|p| std::env::split_paths(p).collect()).unwrap_or_default();
     if cfg!(windows) {
@@ -63,6 +69,7 @@ pub fn find_codex(path_var: Option<&OsStr>, home: Option<&Path>, exists: impl Fn
             dirs.extend([".local/bin", ".npm-global/bin", ".volta/bin", ".bun/bin"].map(|d| home.join(d)));
         }
     }
+    dirs.extend(app_bin.map(Path::to_path_buf));
     dirs.iter().flat_map(|dir| names.iter().map(move |name| dir.join(name))).find(|path| exists(path))
 }
 
@@ -71,7 +78,8 @@ pub fn find_codex(path_var: Option<&OsStr>, home: Option<&Path>, exists: impl Fn
 pub fn codex_program() -> (PathBuf, OsString) {
     let path_var = std::env::var_os("PATH");
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let program = find_codex(path_var.as_deref(), home.as_deref(), Path::is_file);
+    let app_bin = crate::install::bin_dir();
+    let program = find_codex(path_var.as_deref(), home.as_deref(), app_bin.as_deref(), Path::is_file);
     let mut dirs: Vec<PathBuf> = path_var.as_deref().map(|p| std::env::split_paths(p).collect()).unwrap_or_default();
     if let Some(dir) = program.as_deref().and_then(Path::parent) {
         if !dirs.iter().any(|d| d == dir) {
@@ -506,14 +514,28 @@ mod tests {
     fn codex_is_found_on_path_first_then_in_the_usual_install_places() {
         let path = OsString::from("/a/bin:/b/bin");
         let at = |hit: &'static str| move |p: &Path| p == Path::new(hit);
-        assert_eq!(find_codex(Some(&path), None, at("/b/bin/codex")), Some(PathBuf::from("/b/bin/codex")));
+        assert_eq!(find_codex(Some(&path), None, None, at("/b/bin/codex")), Some(PathBuf::from("/b/bin/codex")));
         assert_eq!(
-            find_codex(None, None, at("/opt/homebrew/bin/codex")),
+            find_codex(None, None, None, at("/opt/homebrew/bin/codex")),
             Some(PathBuf::from("/opt/homebrew/bin/codex"))
         );
         let home = Path::new("/home/u");
-        assert_eq!(find_codex(None, Some(home), at("/home/u/.local/bin/codex")), Some(home.join(".local/bin/codex")));
-        assert_eq!(find_codex(Some(&path), Some(home), |_| false), None);
+        assert_eq!(
+            find_codex(None, Some(home), None, at("/home/u/.local/bin/codex")),
+            Some(home.join(".local/bin/codex"))
+        );
+        assert_eq!(find_codex(Some(&path), Some(home), None, |_| false), None);
+        let app = Path::new("/Users/u/Library/Application Support/Bilinkers/bin");
+        assert_eq!(
+            find_codex(Some(&path), None, Some(app), at("/Users/u/Library/Application Support/Bilinkers/bin/codex")),
+            Some(app.join("codex"))
+        );
+        let both = |p: &Path| p == Path::new("/opt/homebrew/bin/codex") || p.starts_with(app);
+        assert_eq!(
+            find_codex(None, None, Some(app), both),
+            Some(PathBuf::from("/opt/homebrew/bin/codex")),
+            "the user's own install wins over the app's copy"
+        );
     }
 
     type Vars = Vec<(&'static str, OsString)>;

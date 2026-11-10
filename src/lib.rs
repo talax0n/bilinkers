@@ -6,6 +6,7 @@ pub mod devtools;
 pub mod final_test;
 pub mod frame;
 pub mod grouped_reading;
+pub mod install;
 pub mod js;
 pub mod llm;
 pub mod logger;
