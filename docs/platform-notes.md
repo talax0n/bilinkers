@@ -44,6 +44,13 @@ Inside a unit, after a row is opened and its gate passed, `src/runners/unit.js` 
 - Nothing by the deadline means a video or notes row.
 - A row titled exactly "Reading" always gets the `reading` runner without sniffing. See [Unit activity list](#unit-activity-list).
 
+## Island map (Beelingua home)
+
+- `https://lms.binus.ac.id/beelingua` shows the eight courses B1.1 to C2.2 as `.hoverable-pointer` nodes. Whitespace-stripped labels match `^[BC]\d\.\d$`. (src/cli.js, detectMode has no mode for this page.)
+- A JS `click()` on a node does nothing (verified 2026-11-10). A Selenium Actions pointer click (move to the element, then click) opens a side panel instead of navigating.
+- The panel contains the heading `ENG-<label>`. A **View Unit List** button means the course is unfinished. Only **View Course Detail** means it is complete. Either button navigates to that course's roadmap at `/beelingua/student/class/<id>`.
+- An open panel can cover other nodes. Reload the home page before opening the next one.
+
 ## Course roadmap
 
 - The roadmap is an isometric city map. A zig-zag road of hexagon nodes ("Unit 1", "Unit 2", "Checkpoint 1", "Unit 3", ...) with a header readout like "Unit 4/8  CP 1/3  FT 0/1". Its URL has no `/session/{id}` suffix.
