@@ -6,8 +6,15 @@ use crate::js;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LlmProvider {
+    Codex,
     OpenAi,
     Gemini,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexConfig {
+    /// `CODEX_MODEL`; unset or empty leaves the choice to the Codex CLI.
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +50,7 @@ pub struct Paths {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub llm_provider: LlmProvider,
+    pub codex: CodexConfig,
     pub openai: OpenAiConfig,
     pub gemini: GeminiConfig,
     pub timeouts: Timeouts,
@@ -75,13 +83,16 @@ fn or_default(env: &HashMap<String, String>, key: &str, default: &str) -> String
 }
 
 pub fn build_config(env: &HashMap<String, String>) -> Config {
-    // createClient picks Gemini only for exactly "gemini"; anything else is OpenAI.
-    let llm_provider = match or_default(env, "LLM_PROVIDER", "openai").as_str() {
+    // createClient matches "codex" and "gemini" exactly; anything else is OpenAI.
+    let llm_provider = match or_default(env, "LLM_PROVIDER", "codex").as_str() {
+        "codex" => LlmProvider::Codex,
         "gemini" => LlmProvider::Gemini,
         _ => LlmProvider::OpenAi,
     };
+    let codex_model = or_default(env, "CODEX_MODEL", "");
     Config {
         llm_provider,
+        codex: CodexConfig { model: (!codex_model.is_empty()).then_some(codex_model) },
         openai: OpenAiConfig {
             base_url: env.get("OPENAI_BASE_URL").cloned(),
             api_key: env.get("OPENAI_API_KEY").cloned(),
@@ -113,6 +124,16 @@ mod tests {
         assert_eq!(cfg.openai.model, "gpt-4o");
         assert_eq!(cfg.openai.base_url.as_deref(), Some("https://x"));
         assert_eq!(cfg.openai.api_key.as_deref(), Some("k"));
+    }
+
+    #[test]
+    fn build_config_defaults_to_the_codex_provider_with_no_model() {
+        let cfg = build_config(&env(&[]));
+        assert_eq!(cfg.llm_provider, LlmProvider::Codex);
+        assert_eq!(cfg.codex.model, None);
+        assert_eq!(build_config(&env(&[("CODEX_MODEL", "gpt-5")])).codex.model.as_deref(), Some("gpt-5"));
+        assert_eq!(build_config(&env(&[("LLM_PROVIDER", "gemini")])).llm_provider, LlmProvider::Gemini);
+        assert_eq!(build_config(&env(&[("LLM_PROVIDER", "other")])).llm_provider, LlmProvider::OpenAi);
     }
 
     #[test]

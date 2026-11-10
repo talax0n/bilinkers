@@ -4,6 +4,7 @@
 use serde_json::{json, Value};
 
 use crate::answer_loop::Answerer;
+use crate::llm::LlmError;
 use crate::question_types::{ErrorAnalysisData, OptionButton, QuestionKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,7 +112,7 @@ impl Answerer<ErrorAnalysisData> for BruteForceAnswerer {
         _instruction: &str,
         data: &ErrorAnalysisData,
         _feedback: Option<&str>,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, LlmError> {
         let combinations = self.combinations.get_or_insert_with(|| {
             let letters: Vec<Option<char>> = data.candidates.iter().map(|c| c.letter).collect();
             get_letter_combinations(&letters)
@@ -120,10 +121,10 @@ impl Answerer<ErrorAnalysisData> for BruteForceAnswerer {
         self.attempt_index += 1;
         match candidate_letters {
             Some(letters) => Ok(json!({ "answers": letters })),
-            None => {
-                Err("errorAnalysis brute force: exhausted all candidate-letter combinations without a correct answer"
-                    .to_string())
-            }
+            None => Err(LlmError::Failed(
+                "errorAnalysis brute force: exhausted all candidate-letter combinations without a correct answer"
+                    .to_string(),
+            )),
         }
     }
 }
@@ -142,9 +143,9 @@ impl TryEachOption {
 }
 
 impl<D> Answerer<D> for TryEachOption {
-    fn answer(&mut self, _instruction: &str, _data: &D, _feedback: Option<&str>) -> Result<Value, String> {
+    fn answer(&mut self, _instruction: &str, _data: &D, _feedback: Option<&str>) -> Result<Value, LlmError> {
         if self.options.is_empty() {
-            return Err("undefined is not an object (evaluating 'option.letter')".to_string());
+            return Err(LlmError::Failed("undefined is not an object (evaluating 'option.letter')".to_string()));
         }
         let option = &self.options[self.attempt % self.options.len()];
         self.attempt += 1;
@@ -161,7 +162,7 @@ impl<D> Answerer<D> for TryEachOption {
 pub struct EmptyAnswer;
 
 impl<D> Answerer<D> for EmptyAnswer {
-    fn answer(&mut self, _instruction: &str, _data: &D, _feedback: Option<&str>) -> Result<Value, String> {
+    fn answer(&mut self, _instruction: &str, _data: &D, _feedback: Option<&str>) -> Result<Value, LlmError> {
         Ok(json!({}))
     }
 }
@@ -179,7 +180,7 @@ mod tests {
         }
     }
 
-    fn answers(answerer: &mut BruteForceAnswerer, data: &ErrorAnalysisData) -> Result<Value, String> {
+    fn answers(answerer: &mut BruteForceAnswerer, data: &ErrorAnalysisData) -> Result<Value, LlmError> {
         answerer.answer("", data, None).map(|v| v["answers"].clone())
     }
 
@@ -211,7 +212,7 @@ mod tests {
         assert_eq!(answers(&mut answerer, &data), Ok(json!(["B"])));
         assert_eq!(answers(&mut answerer, &data), Ok(json!(["A", "B"])));
         let err = answers(&mut answerer, &data).unwrap_err();
-        assert!(err.contains("exhausted all candidate-letter combinations"), "{err}");
+        assert!(err.to_string().contains("exhausted all candidate-letter combinations"), "{err}");
     }
 
     #[test]

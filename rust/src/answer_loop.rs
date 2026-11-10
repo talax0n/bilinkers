@@ -1,10 +1,12 @@
 //! Port of `src/answerLoop.js`, synchronous. Logging is left out.
+//! A sign-in error aborts at once: no call retries and no further answer attempts.
 
 use std::num::NonZeroU32;
 
 use serde_json::Value;
 
 use crate::js;
+use crate::llm::{LlmError, NotSignedIn};
 use crate::question_types::Dom;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,14 +50,14 @@ pub trait Handler {
 
 /// Produces an answer object such as `{"answer": "A"}` or `{"answers": [...]}`.
 pub trait Answerer<D> {
-    fn answer(&mut self, instruction: &str, question_data: &D, feedback: Option<&str>) -> Result<Value, String>;
+    fn answer(&mut self, instruction: &str, question_data: &D, feedback: Option<&str>) -> Result<Value, LlmError>;
 }
 
 impl<D, F> Answerer<D> for F
 where
-    F: FnMut(&str, &D, Option<&str>) -> Result<Value, String>,
+    F: FnMut(&str, &D, Option<&str>) -> Result<Value, LlmError>,
 {
-    fn answer(&mut self, instruction: &str, question_data: &D, feedback: Option<&str>) -> Result<Value, String> {
+    fn answer(&mut self, instruction: &str, question_data: &D, feedback: Option<&str>) -> Result<Value, LlmError> {
         self(instruction, question_data, feedback)
     }
 }
@@ -75,15 +77,16 @@ pub const DEFAULT_CALL_ATTEMPTS: NonZeroU32 = NonZeroU32::new(3).unwrap();
 
 /// Retries transient LLM or proxy failures so they don't use up an answer attempt.
 pub fn call_with_retry<T, S: Sleeper>(
-    mut f: impl FnMut() -> Result<T, String>,
+    mut f: impl FnMut() -> Result<T, LlmError>,
     sleeper: &mut S,
     max_attempts: NonZeroU32,
-) -> Result<T, String> {
+) -> Result<T, LlmError> {
     let max_attempts = max_attempts.get();
     let mut i = 0;
     loop {
         match f() {
             Ok(value) => return Ok(value),
+            Err(err @ LlmError::NotSignedIn) => return Err(err),
             Err(err) if i + 1 >= max_attempts => return Err(err),
             Err(_) => sleeper.sleep(1000, 1000),
         }
@@ -117,11 +120,11 @@ fn attempt<H: Handler, A: Answerer<H::Data>, S: Sleeper>(
     feedback: Option<&str>,
     answerer: &mut A,
     sleeper: &mut S,
-) -> Result<(Value, Check), String> {
+) -> Result<(Value, Check), LlmError> {
     let result =
         call_with_retry(|| answerer.answer(instruction, question_data, feedback), sleeper, DEFAULT_CALL_ATTEMPTS)?;
     if result.is_null() {
-        return Err("null is not an object (evaluating 'llmResult.answer')".to_string());
+        return Err(LlmError::Failed("null is not an object (evaluating 'llmResult.answer')".to_string()));
     }
     handler.answer(&result)?;
     let check = handler.check_result(dom)?;
@@ -130,6 +133,7 @@ fn attempt<H: Handler, A: Answerer<H::Data>, S: Sleeper>(
 
 /// `retry_limit` is signed because the exercise runner passes `options.length - 1`,
 /// which is -1 for a page with no options and then makes no attempt at all.
+/// `Err` is the JS rethrow of a sign-in error.
 pub fn process_question<H: Handler, A: Answerer<H::Data>, S: Sleeper>(
     handler: Option<&mut H>,
     dom: &Dom,
@@ -137,9 +141,9 @@ pub fn process_question<H: Handler, A: Answerer<H::Data>, S: Sleeper>(
     retry_limit: i64,
     answerer: &mut A,
     sleeper: &mut S,
-) -> QuestionResult {
+) -> Result<QuestionResult, NotSignedIn> {
     let Some(handler) = handler else {
-        return QuestionResult::Unhandled;
+        return Ok(QuestionResult::Unhandled);
     };
 
     let question_data = handler.parse(dom);
@@ -182,7 +186,8 @@ pub fn process_question<H: Handler, A: Answerer<H::Data>, S: Sleeper>(
                     });
                 }
             }
-            Err(message) => {
+            Err(LlmError::NotSignedIn) => return Err(NotSignedIn),
+            Err(LlmError::Failed(message)) => {
                 outcome = Outcome::Incorrect;
                 feedback = Some(format!("previous attempt failed with an error: {message}"));
                 attempts += 1;
@@ -195,7 +200,7 @@ pub fn process_question<H: Handler, A: Answerer<H::Data>, S: Sleeper>(
         }
     }
 
-    QuestionResult::Finished { outcome, attempts }
+    Ok(QuestionResult::Finished { outcome, attempts })
 }
 
 #[cfg(test)]
@@ -237,7 +242,7 @@ mod tests {
 
     type NoHandler = FakeHandler<fn(&Value) -> Result<(), String>, fn() -> Result<Check, String>>;
 
-    fn always_a(_: &str, _: &Value, _: Option<&str>) -> Result<Value, String> {
+    fn always_a(_: &str, _: &Value, _: Option<&str>) -> Result<Value, LlmError> {
         Ok(json!({ "answer": "A" }))
     }
 
@@ -245,7 +250,7 @@ mod tests {
     fn process_question_returns_unhandled_when_no_type_module_matches() {
         let result =
             process_question::<NoHandler, _, _>(None, &Dom::default(), "instr", 1, &mut always_a, &mut NoSleep);
-        assert_eq!(result, QuestionResult::Unhandled);
+        assert_eq!(result, Ok(QuestionResult::Unhandled));
     }
 
     #[test]
@@ -259,7 +264,7 @@ mod tests {
             check: || Check::from_raw("correct"),
         };
         let result = process_question(Some(&mut handler), &Dom::default(), "instr", 1, &mut always_a, &mut NoSleep);
-        assert_eq!(result, QuestionResult::Finished { outcome: Outcome::Correct, attempts: 1 });
+        assert_eq!(result, Ok(QuestionResult::Finished { outcome: Outcome::Correct, attempts: 1 }));
         assert_eq!(answer_calls.len(), 1);
     }
 
@@ -272,7 +277,7 @@ mod tests {
             Ok(json!({ "answer": "A" }))
         };
         let result = process_question(Some(&mut handler), &Dom::default(), "instr", 1, &mut answerer, &mut NoSleep);
-        assert_eq!(result, QuestionResult::Finished { outcome: Outcome::Incorrect, attempts: 2 });
+        assert_eq!(result, Ok(QuestionResult::Finished { outcome: Outcome::Incorrect, attempts: 2 }));
         assert_eq!(
             feedbacks,
             vec![
@@ -303,7 +308,7 @@ mod tests {
             Ok(json!({ "answer": if call == 1 { "A" } else { "B" } }))
         };
         let result = process_question(Some(&mut handler), &Dom::default(), "instr", 1, &mut answerer, &mut NoSleep);
-        assert_eq!(result, QuestionResult::Finished { outcome: Outcome::Incorrect, attempts: 2 });
+        assert_eq!(result, Ok(QuestionResult::Finished { outcome: Outcome::Incorrect, attempts: 2 }));
         assert_eq!(answers_tried, vec![json!("A"), json!("B")]);
         assert_eq!(
             feedbacks,
@@ -319,13 +324,42 @@ mod tests {
         let mut handler =
             FakeHandler { answer: |_: &Value| Err("stale element".to_string()), check: || Check::from_raw("correct") };
         let result = process_question(Some(&mut handler), &Dom::default(), "instr", 1, &mut always_a, &mut NoSleep);
-        assert_eq!(result, QuestionResult::Finished { outcome: Outcome::Incorrect, attempts: 2 });
+        assert_eq!(result, Ok(QuestionResult::Finished { outcome: Outcome::Incorrect, attempts: 2 }));
     }
 
     #[test]
     fn process_question_treats_an_unexpected_check_result_value_as_incorrect() {
         let mut handler = FakeHandler { answer: |_: &Value| Ok(()), check: || Check::from_raw("not-a-real-status") };
         let result = process_question(Some(&mut handler), &Dom::default(), "instr", 0, &mut always_a, &mut NoSleep);
-        assert_eq!(result, QuestionResult::Finished { outcome: Outcome::Incorrect, attempts: 1 });
+        assert_eq!(result, Ok(QuestionResult::Finished { outcome: Outcome::Incorrect, attempts: 1 }));
+    }
+
+    #[test]
+    fn process_question_stops_on_the_first_sign_in_error_instead_of_retrying() {
+        let mut handler = FakeHandler { answer: |_: &Value| Ok(()), check: || Check::from_raw("correct") };
+        let mut calls = 0;
+        let mut answerer = |_: &str, _: &Value, _: Option<&str>| -> Result<Value, LlmError> {
+            calls += 1;
+            Err(LlmError::NotSignedIn)
+        };
+        let result = process_question(Some(&mut handler), &Dom::default(), "i", 25, &mut answerer, &mut NoSleep);
+        assert_eq!(result, Err(NotSignedIn));
+        assert!(result.unwrap_err().to_string().contains("codex login"));
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn call_with_retry_retries_other_failures_up_to_max_attempts() {
+        let mut calls = 0;
+        let result: Result<(), LlmError> = call_with_retry(
+            || {
+                calls += 1;
+                Err(LlmError::Failed("403 voucher".to_string()))
+            },
+            &mut NoSleep,
+            DEFAULT_CALL_ATTEMPTS,
+        );
+        assert_eq!(result, Err(LlmError::Failed("403 voucher".to_string())));
+        assert_eq!(calls, 3);
     }
 }

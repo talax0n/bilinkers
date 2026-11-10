@@ -281,6 +281,7 @@ pub fn answer_with_retry<D, A: Answerer<D>, S: Sleeper>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::LlmError;
     use serde_json::json;
 
     struct NoSleep;
@@ -390,9 +391,9 @@ mod tests {
     #[test]
     fn answer_with_retry_retries_up_to_max_attempts_then_returns_needs_review() {
         let mut calls = 0;
-        let mut answerer = |_: &str, _: &Value, _: Option<&str>| -> Result<Value, String> {
+        let mut answerer = |_: &str, _: &Value, _: Option<&str>| -> Result<Value, LlmError> {
             calls += 1;
-            Err("boom".to_string())
+            Err(LlmError::Failed("boom".to_string()))
         };
         let result = answer_with_retry(&mut answerer, &question(), NonZeroU32::new(3).unwrap(), &mut NoSleep, None);
         assert_eq!(result, Fresh { answer: FinalAnswer::NeedsReview, confidence: 0.0 });
@@ -405,7 +406,7 @@ mod tests {
         let mut answerer = |_: &str, _: &Value, _: Option<&str>| {
             calls += 1;
             if calls < 2 {
-                return Err("boom".to_string());
+                return Err(LlmError::Failed("boom".to_string()));
             }
             Ok(json!({ "answer": "D", "confidence": 0.8 }))
         };
