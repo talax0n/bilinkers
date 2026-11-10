@@ -1,24 +1,8 @@
 const { attachToLms, getCurrentQuestionDom } = require('../browser');
 const logger = require('../logger');
 
-// Brute-forces a Beelingua reading BlExercise (the numbered 1..N tile layout:
-// passage on the left, multiple option-button sub-questions on the right)
-// with NO LLM. Verified live against "ENG-B2.2 Unit 1" (15 questions, mixed
-// reading-comprehension / true-false-not-given / paraphrase items):
-//   - A wrong answer re-enables its options (you can re-pick), a CORRECT
-//     answer locks them (all disabled). So each question is just cycled
-//     A -> B -> C -> D until it sticks — no reasoning needed.
-//   - Each tile's background colour is the per-question verdict, updated when
-//     a Check action or numbered-pill transition grades the answer. It is the
-//     one signal that works for every item type here:
-//       correct   -> rgba(54, 192, 203, .3)  (faint teal)
-//       wrong     -> rgba(232, 166, 38, .3)  (faint orange)
-//       unanswered-> rgb(127, 202, 212)      (solid teal)
-//       current   -> solid orange
-//   - Submit is gated: the confirm modal says "All answers must be correct
+// Site behavior this relies on: docs/platform-notes.md#grouped-reading-exercise
 
-// A group is keyed by pill and group index, so tried-letter memory survives
-// navigation within one run without colliding on repeated option text.
 const LETTERS = ['A', 'B', 'C', 'D', 'E', 'F'];
 
 async function readPills(driver) {
@@ -53,11 +37,8 @@ async function leaveByNextPill(driver, pills, currentPill) {
   return clicked;
 }
 
-// Answers every still-open option-group on the current screen (a group whose
-// options are enabled = not yet correct). Options are one flat list of
-// buttons; a new group starts each time the letter resets to "A". Picks the
-// first letter not already tried for that group, so repeated visits walk
-// A -> B -> C -> D instead of re-picking the same wrong option.
+// Options are one flat list. A new group starts at each "A". Tried letters are keyed
+// by pill, group index and option text, so repeat visits walk A, B, C, D.
 async function answerOpenGroups(driver, triedMap, pill) {
   const triedObj = Object.fromEntries([...triedMap].map(([key, value]) => [key, [...value]]));
   const acted = await driver.executeScript(
@@ -96,9 +77,7 @@ async function answerOpenGroups(driver, triedMap, pill) {
   return acted;
 }
 
-// Is there a per-question "Check" (a.k.a. "Check My Answer") button on the
-// current screen? Those questions grade one option at a time in place, so
-// they can be brute-forced without leaving the question.
+// A Check button means the question grades in place.
 async function hasCheckButton(driver) {
   return driver.executeScript(`
     return !![...document.querySelectorAll('button')].find(b => /^Check( My Answer)?$/i.test(b.textContent.trim()) && !b.disabled);
@@ -112,10 +91,7 @@ async function countEnabledOptions(driver) {
   `);
 }
 
-// In-place brute force for a "Check My Answer" question: pick A, Check, and
-// if the feedback says "Incorrect!" the options stay enabled (verified live)
-// so pick B, Check, ... through E until "Correct!" locks the question. Fully
-// resolves the question in a single visit. Returns 'correct' | 'exhausted'.
+// Wrong answers keep options enabled, so cycle letters until "Correct!" locks them.
 async function answerCheckQuestion(driver) {
   for (const letter of LETTERS) {
     const state = await driver.executeScript(
@@ -131,7 +107,7 @@ async function answerCheckQuestion(driver) {
       letter
     );
     if (state === 'locked') return 'correct'; // already solved this visit
-    if (state === 'no-letter') continue; // fewer than 5 options — skip missing letters
+    if (state === 'no-letter') continue; // fewer options than letters
 
     await driver.sleep(400);
     await driver.executeScript(`const c = [...document.querySelectorAll('button')].find(b => /^Check( My Answer)?$/i.test(b.textContent.trim()) && !b.disabled); if (c) c.click();`);
@@ -143,14 +119,12 @@ async function answerCheckQuestion(driver) {
     `);
     logger.info('Reading exercise: check attempt', { letter, outcome });
     if (outcome === 'Correct!') return 'correct';
-    // 'Incorrect!' — options stay enabled, loop to the next letter.
+    // Incorrect. Options stay enabled, so try the next letter.
   }
   return 'exhausted';
 }
 
-// Finalises once every tile is teal. Opens the Submit confirm and clicks the
-// modal's own Submit; if the "all answers must be correct" guard fires, backs
-// out via Close so the loop keeps fixing. Returns 'done' | 'blocked' | 'no-submit'.
+// Submit refuses with "All answers must be correct" until every item is right.
 async function trySubmit(driver) {
   const opened = await driver.executeScript(`
     const s = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Submit' && !b.disabled);
@@ -169,15 +143,12 @@ async function trySubmit(driver) {
     return 'blocked';
   }
 
-  // All-correct path: Submit opens an "Are you sure?" confirmation with
-  // Yes/No — click Yes to actually record the attempt.
   const confirmed = await driver.executeScript(`
     const y = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Yes' && b.offsetParent !== null);
     if (y) { y.click(); return true; }
     return false;
   `);
   if (!confirmed) {
-    // No Yes/No and not blocked — close whatever opened and treat as not done.
     await driver.executeScript(`const c = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Close'); if (c) c.click();`);
     return 'blocked';
   }
@@ -185,9 +156,6 @@ async function trySubmit(driver) {
   return 'done';
 }
 
-// After a passing submit the result screen shows "You Passed! Your Score:
-// 100" with a "Next" button back to the unit's activity list — read the
-// score and click Next so the activity is fully closed out.
 async function readResultAndAdvance(driver) {
   await driver.switchTo().defaultContent();
   const deadline = Date.now() + 8000;
@@ -211,7 +179,7 @@ async function main(existingDriver) {
   const driver = existingDriver || (await attachToLms());
   const tried = new Map();
 
-  // Native MUI exercise, no iframe — skip the LTI-oriented 30s default wait.
+  // Skip the long LTI iframe wait.
   await getCurrentQuestionDom(driver, { iframeWaitMs: 300 });
   const pills = await readPills(driver);
   const tileCount = pills.length;
@@ -221,11 +189,7 @@ async function main(existingDriver) {
   }
   logger.info('Reading exercise: starting', { tileCount });
 
-  // A question is done when every option on it is locked (Mui-disabled) —
-  // wrong answers always re-enable, so "all locked" can only mean correct.
-  // Each pass walks all tiles answering whatever's still open with a fresh
-  // letter; passes repeat until Submit goes through. Bounded so a genuinely
-  // stuck item can't spin forever (worst case ~ options-per-question passes).
+  // Correct answers lock and wrong ones re-enable, so all-locked means correct. Passes are capped.
   const MAX_PASSES = 12;
 
   for (let pass = 0; pass < MAX_PASSES; pass += 1) {
@@ -237,10 +201,8 @@ async function main(existingDriver) {
 
       if ((await countEnabledOptions(driver)) === 0) continue; // all locked = correct
 
-      // Branch on the question's own UI: a "Check My Answer" button grades one
-      // option at a time in place, so cycle it to a correct answer without
-      // leaving the question. Deferred items are evaluated by leaving via a
-      // numbered pill, then revisiting on a later pass to observe the lock.
+      // Check questions resolve in one visit. Others are graded by leaving via a pill
+      // and seen locked on a later pass.
       if (await hasCheckButton(driver)) {
         const outcome = await answerCheckQuestion(driver);
         answeredThisPass += 1;
@@ -268,8 +230,7 @@ async function main(existingDriver) {
     }
 
     if (answeredThisPass === 0 && result !== 'done') {
-      // Nothing left to answer but Submit still refuses — a locked item is
-      // actually wrong (breaks the re-enable assumption). Stop rather than spin.
+      // Everything is locked but Submit still refuses, so a locked item is wrong.
       logger.warn('Reading exercise: stuck — all items locked but Submit blocked', { pass });
       return { status: 'stuck' };
     }

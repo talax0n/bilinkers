@@ -13,10 +13,8 @@ const SYSTEM_PROMPT =
   'matching the shape implied by the question data (e.g. { "answer": "..." } for a ' +
   'single answer, or { "answers": [...] } for multiple blanks/pills). No prose outside the JSON.';
 
-// Some providers don't support response_format: json_object (one observed
-// provider returns a 502 for the whole request when it's set), so JSON is
-// enforced via the system prompt only — models occasionally wrap the
-// reply in a ```json fence anyway, so strip that before parsing.
+// No response_format. One provider returns 502 when it is set.
+// Models may still wrap the JSON in a ```json fence.
 function parseJsonContent(content, label) {
   if (!content) {
     throw new Error(`answerQuestion: ${label} response had no message content`);

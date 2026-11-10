@@ -4,13 +4,8 @@ const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
-// selenium-manager's default (latest stable) chromedriver frequently doesn't
-// match a CDP-attached browser's actual Chromium build (e.g. Brave reports
-// its own version, not the underlying Chromium's — and even for plain
-// Chrome, "latest" chromedriver can drift ahead of an unupdated browser).
-// chromedriver only requires a matching *major* version, so this resolves
-// one for whatever's actually listening on the debug port: reuse it from
-// selenium's local cache if present, otherwise download a matching one.
+// selenium-manager's latest chromedriver often mismatches the attached browser (Brave
+// reports its own version). Only the major version has to match.
 function fetchBrowserMajorVersion(debuggerAddress) {
   return new Promise((resolve, reject) => {
     http

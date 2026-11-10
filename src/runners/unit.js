@@ -6,26 +6,9 @@ const { run: runIframeExercise } = require('./iframe');
 const { run: runReadingExercise } = require('./reading');
 const { isGroupedReadingLayout, groupedReadingLayoutFromDocument } = require('../groupedReading');
 
-// This script attaches to an already-running Chromium-based browser (Chrome,
-// Brave, Edge) launched with --remote-debugging-port=9222, and drives a
-// whole unit's activity list (see the "Unit 2" screenshot: a stack of rows —
-// video, notes, Interactive Vocabulary/Grammar Activity, Multiple Choice
-// Grammar Activity, Listening, Reading — each locked/in-progress/done) end
-// to end: open the next unfinished row, run the matching bot
-// (runners/exercise.js or runners/iframe.js) on the same browser session,
-// go back to the list, repeat until nothing unlocked is left. Run via
-// `node src/cli.js unit`, or invoke this file directly if the browser
-// is already up and sitting on a unit's activity-list page (the URL with no
-// /content/{id} suffix).
+// Site behavior this relies on: docs/platform-notes.md#unit-activity-list
 
-// Each row is a plain MUI button with no href (React onClick) — title text
-// lives in its ".bl-text-ellipsis" label, and a locked row carries both the
-// "disabled" attribute and the Mui-disabled class (verified live against the
-// "Unit 2" page: Reading/Listening/etc. are locked exactly this way until
-// the row above them is completed). A completed row's status icon is the
-// same checkmark SVG every time (verified on the already-done "Interactive
-// Vocabulary Activity" row) — matched by its path data so finished rows get
-// skipped instead of being re-run from scratch.
+// Completed rows show this checkmark SVG path.
 const CHECKMARK_PATH = 'M14.2021 1.52344L5.45215 10.273L1.07715 5.89844';
 
 async function readRows(driver) {
@@ -46,19 +29,12 @@ async function readRows(driver) {
   );
 }
 
-// A JS-synthetic target.click() here was found (live) to sometimes not
-// register as a real navigation trigger on this row component — same class
-// of bug hit earlier on the island-map course nodes and checkpoint pill
-// options, both of which needed a real, trusted pointer event instead.
-// Using Actions-based click for the same reason.
+// A synthetic click() sometimes doesn't navigate on these rows, so use a real pointer click.
 async function clickRow(driver, title) {
   await driver.switchTo().defaultContent();
   const buttons = await driver.findElements(By.css('button.bl-w-full'));
   for (const btn of buttons) {
-    // textContent (not Selenium's getText()) to match readRows()'s reading
-    // exactly — getText() normalizes whitespace differently (e.g. collapses
-    // the literal non-breaking space some titles contain), which made this
-    // never match the title readRows() had just handed back.
+    // textContent, not getText(), to match readRows (getText collapses non-breaking spaces).
     const text = await driver.executeScript(
       "const label = arguments[0].querySelector('.bl-text-ellipsis'); return label ? label.textContent.trim() : '';",
       btn
@@ -77,19 +53,8 @@ async function clickRow(driver, title) {
   return false;
 }
 
-// Both native and iframe-backed activities open behind a native top-level
-// "Exercise" gate first (URL suffix "/BlExercise?status=0" — Total
-// Question/Passing Score/Cancel+Start buttons, no iframe yet) — verified
-// live on "Interactive Grammar Activity": the real content (native quiz or
-// LTI iframe) only loads after clicking through. A prior attempt already on
-// record relabels the button "Continue" instead of "Start" (verified live,
-// same gate, second visit) — both are accepted. Polls for a few seconds
-// since the button isn't mounted the instant the URL changes (verified
-// live: querying right after the URL update found zero buttons at all,
-// React still rendering the route) — a single immediate check silently
-// finds nothing and moves on, never clicking to enter the exercise.
-// Resolves false (no retry needed) when the gate genuinely isn't present,
-// since not every activity type has one.
+// Activities open behind a Start/Continue gate that mounts after the URL changes.
+// Not every activity has one.
 async function clickStartGate(driver, timeoutMs = 8000) {
   await driver.switchTo().defaultContent();
   const deadline = Date.now() + timeoutMs;
@@ -106,32 +71,14 @@ async function clickStartGate(driver, timeoutMs = 8000) {
   return false;
 }
 
-// cli.js's own MuiButtonBase/bl-w-full top-level check can't be reused here:
-// this dashboard's chrome (header, XP badge, the row list itself) is built
-// from the same MUI components, so that marker is present on every page
-// regardless of what activity is open. An iframe is the reliable signal for
-// the LTI (Bits) player; its absence plus the option-button class the
-// native quiz types (readingComprehension/audioMultipleChoice) key off of
-// distinguishes native "exercise" pages from non-exercise content
-// (video, notes) that this bot has nothing to do with.
-// Checks the iframe signal AND the top-level markup every tick instead of
-// waiting out the full iframe-poll deadline first — a native "exercise"
-// activity has no iframe at all, so the old sequential order always burned
-// the entire 8s iframe timeout before ever looking at the DOM that already
-// had its answer. Whichever signal appears first wins; only returns null
-// once nothing has shown up by the deadline.
+// Checks iframe and top-level markers each tick. Native exercises never get an iframe.
 async function detectMode(driver) {
   await driver.switchTo().defaultContent();
   const deadline = Date.now() + 8000;
   for (;;) {
     const iframes = await driver.findElements(By.css('iframe'));
     if (iframes.length > 0) {
-      // Two different activities live inside an iframe: the Bits/LTI player
-      // (quiz-input-* markup, or a #/n slide-nav link) is 'iframe'; a reading
-      // BlExercise (passage + numbered tiles + MUI 'bl-w-full
-      // justify-content-start' option buttons) is 'reading'. Look inside to
-      // tell them apart — treating every iframe as 'iframe' ran the wrong
-      // runner on reading exercises.
+      // Reading BlExercises also live in an iframe, with MUI option buttons instead of quiz-input-*.
       await driver.switchTo().frame(iframes[0]);
       const iframeHtml = await driver.executeScript('return document.documentElement.outerHTML');
       await driver.switchTo().defaultContent();
@@ -152,12 +99,7 @@ async function detectMode(driver) {
 
 const RUNNERS = { exercise: runExercise, iframe: runIframeExercise, reading: runReadingExercise };
 
-// Non-quiz rows (video, reading material / Bee Notes) have no gate and no
-// questions — they complete just by being viewed. A video only counts once it
-// reaches the end, so any <video> on the page (top-level or inside an iframe)
-// is muted and played normally until its ended state is observable. Static
-// content (notes) needs nothing beyond the
-// open the caller already did. Returns 'video' | 'static'.
+// Video and notes rows complete by being viewed. Videos must reach their end.
 const PLAY_VIDEOS = `
   const vids = [...document.querySelectorAll('video')];
   vids.forEach((v) => {
@@ -183,25 +125,10 @@ async function completeMediaActivity(driver) {
     }
   }
   if (playing > 0) {
-    // 15 minutes, not 5 — the seek-to-near-end trick below only fires once
-    // `duration` is known, and verified live: one video's metadata was slow
-    // enough to probe that it fell back to real-time playback for its full
-    // ~4:44 length, finishing (ended: true) only seconds after a 5-minute
-    // cap had already thrown. 15 minutes leaves real-time playback of any
-    // normal lecture-length video room to finish even when the seek never
-    // gets a chance to kick in.
+    // 15 minutes covers real-time playback when duration loads too late to seek.
     const deadline = Date.now() + 15 * 60 * 1000;
     while (Date.now() < deadline) {
-      // Actually seeking near the end (not just playing and waiting out real
-      // time) — verified live: without this a 5:24 video held up the run for
-      // its full real-time length. Seeking exactly to `duration` doesn't set
-      // `ended` — it's only ever set by playback actually running forward
-      // into the end (verified live: jumping straight to duration left
-      // ended=false indefinitely; seeking to duration-1 while playing let
-      // the last second play out and ended flip true within ~2s). So this
-      // seeks to one second before the end instead, once, and lets it play
-      // out. Re-checked (not re-seeked) every poll since a video's duration
-      // isn't always known yet on the first pass (metadata still loading).
+      // Seeking exactly to duration never sets ended. Seek to duration - 1 and let it play out.
       const ended = await driver.executeScript(`
         const vids = [...document.querySelectorAll('video')];
         vids.forEach((v) => {
@@ -220,24 +147,15 @@ async function completeMediaActivity(driver) {
     }
     throw new Error('Video did not finish within 15 minutes.');
   }
-  // Static reading material / notes — opening it is enough to mark it
-  // viewed immediately, no playback/render to wait out.
   await driver.sleep(300);
   return 'static';
 }
 
-// existingDriver lets an orchestrator (runners/course.js) drive one continuous
-// browser session across several units instead of each script re-attaching
-// its own driver; standalone invocation (via cli.js or `node
-// src/runners/unit.js` directly) still attaches its own as before.
 async function main(existingDriver) {
   const driver = existingDriver || (await attachToLms());
   const unitUrl = await driver.getCurrentUrl();
 
-  // Titles we've already opened this run. A row that can't be auto-completed
-  // (an unsupported activity, or a video/notes the platform didn't mark done)
-  // must not be re-picked forever — once attempted, it's skipped so the loop
-  // can move on or finish instead of spinning on the same row.
+  // Rows opened once this run are skipped, so an uncompletable row can't loop forever.
   const attempted = new Set();
 
   for (;;) {
@@ -278,34 +196,12 @@ async function main(existingDriver) {
       await driver.sleep(1500);
     }
 
-    // A "Reading" row can mix plain single-group questions with an
-    // "Original vs Paraphrased Text" cluster that renders SEVERAL
-    // questions' option-button groups in the DOM simultaneously (verified
-    // live: 5 groups of 5 buttons each, distinguished only by scroll
-    // position, several enabled at once). detectMode()'s DOM-sniffing
-    // sometimes still calls this 'exercise' (the naive
-    // document.querySelectorAll('...').find(startsWith(letter)) in
-    // _optionButtons.js then grabs whichever group's button matches first
-    // in DOM order, not the one actually being answered — burns all 25
-    // retries as "incorrect" on every clustered question). run-reading-
-    // exercise.js's own group-scoped, Check-button/lock-driven brute force
-    // already handles this shape correctly (and plain standalone questions
-    // too, per its own live verification) with no LLM/text-parsing
-    // involved, so the row's own title — known before it's even opened —
-    // is a more reliable signal here than sniffing the DOM.
+    // Reading rows can show several option groups at once. Only the reading runner scopes clicks per group.
     const mode = next.title === 'Reading' ? 'reading' : await detectMode(driver);
     if (!mode) {
-      // Not a quiz — a video or static reading material / notes. Complete it
-      // by viewing: videos are seeked to the end, notes just need the open.
       const kind = await completeMediaActivity(driver);
       logger.info('Completed media activity', { title: next.title, kind });
-      // A video's 'ended' event only marks the row complete once the SPA's
-      // own onEnded handler has time to POST that to the backend — verified
-      // live: navigating away immediately (via driver.get(), a full reload
-      // that does the SPA's usual internal routing) raced ahead of that
-      // call, leaving the row still "In Progress" even though the client
-      // genuinely saw `ended: true`. A few seconds' grace before leaving is
-      // enough for it to land.
+      // Give the SPA time to POST the video's ended event before reloading.
       if (kind === 'video') await driver.sleep(3000);
       await driver.switchTo().defaultContent();
       await driver.get(unitUrl);
@@ -325,12 +221,7 @@ async function main(existingDriver) {
       return { status: 'stuck', title: next.title, activityStatus: result.status };
     }
 
-    // Same backend-sync race as the media-activity branch above: navigating
-    // away right after a quiz/iframe activity reports 'complete' can still
-    // leave its row un-ticked (verified live: "Interactive Vocabulary
-    // Activity" scored 14/14 and hit its closing screen, then still showed
-    // up as incomplete on the very next row read) — a few seconds' grace
-    // before leaving lets that sync land.
+    // Same backend-sync grace before leaving a finished activity.
     await driver.switchTo().defaultContent();
     await driver.sleep(3000);
     await driver.get(unitUrl);

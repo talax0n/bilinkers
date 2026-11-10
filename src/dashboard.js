@@ -1,21 +1,11 @@
 const MAX_LOG_LINES = 200;
 
-// Live OpenTUI view of a bot run: header, running correct/incorrect tally,
-// and a scrolling log feed. Wraps the existing JSON logger rather than
-// replacing it — logger.js pushes every info/warn/error line here too, so
-// question-type modules and answerLoop.js need no changes to support this.
-//
-// @opentui/core resolves to an async ESM module under Bun, which CommonJS
-// require() can't load — a dynamic import() is required instead, even
-// though the rest of this codebase is CommonJS.
+// @opentui/core is ESM under Bun, so it needs a dynamic import() from CommonJS.
 async function createDashboard({ title }) {
   const { createCliRenderer, BoxRenderable, TextRenderable, ScrollBoxRenderable } = await import('@opentui/core');
   const renderer = await createCliRenderer({ exitOnCtrlC: true });
 
-  // Text elements here had no explicit fg/bg, so they inherited whatever the
-  // terminal's default colors were — invisible (light text on light bg) on
-  // a light-themed terminal. Pinning an explicit dark panel bg with
-  // light-contrast fg makes it readable regardless of the terminal's theme.
+  // Explicit colors keep text readable on light terminal themes.
   const header = new TextRenderable(renderer, {
     id: 'header',
     content: title,

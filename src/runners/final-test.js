@@ -8,56 +8,13 @@ const { createClient, answerQuestion } = require('../llm');
 const { readPills, clickPill, ensurePillsExpanded, clickSaveButton, waitForPillSaved } = require('./checkpoint');
 const logger = require('../logger');
 
-// This script attaches to an already-running Chromium-based browser sitting
-// on an OPEN Final Test attempt (50 questions, 1 attempt, same pill-nav
-// native quiz DOM as a checkpoint) and reads every question into a Markdown
-// answer key. By default it never clicks an option, Save, or Submit — a Final
-// Test has exactly one attempt, so there is no room to brute-force like
-// runners/checkpoint.js does. Listening questions (audioMultipleChoice) are
-// skipped since the bot can't hear the audio. Run via
-// `node src/cli.js final-test`, or invoke this file directly if the
-// browser is already up and sitting on an open Final Test attempt.
-//
-// OPT-IN LISTENING GUESSES: set FINAL_TEST_GUESS_LISTENING=1 — each listening
-// question gets a random option letter clicked and Saved instead of skipped.
-// A blank is worth 0 points; a random guess is ~25% per question, which is
-// strictly better when you only need to clear the passing score (66). The
-// guess is still written to the answer key so you can review it before
-// submitting.
-//
-// OPT-IN auto-answering: set FINAL_TEST_AUTO_ANSWER=1 in .env (and optionally
-// FINAL_TEST_CONFIDENCE_THRESHOLD, default 0.9). The LLM is asked for a
-// self-assessed confidence alongside each answer, and only answers scoring
-// at/above the threshold are auto-clicked and Saved on the spot; the rest
-// still land in the answer key for manual review. Still one attempt — an
-// overconfident guess cannot be undone.
-//
-// MULTI-PASS REVIEW: every run writes its answers (answer, confidence,
-// question text, options) to final-test-answers.json in addition to the
-// markdown key. On a later run over the SAME final test, those previous
-// answers are loaded and each question is re-derived INDEPENDENTLY — the LLM
-// is told what the previous pass suggested but explicitly told not to trust
-// it. Agreement between passes boosts confidence (auto-clickable); a
-// disagreement caps it low so that question stays manual. A third+ pass
-// compounds on the second, so confidence only climbs for answers that keep
-// agreeing pass after pass, and an overconfident wrong guess from a single
-// pass never clears the threshold on its own. FINAL_TEST_REVIEWS_REQUIRED
-// (default 1) adds a hard gate: an answer needs that many consecutive
-// agreeing passes before it can auto-click at all.
-//
-// STALE-GUARD: the json also stores the attempt URL's path (testId) it was
-// scraped from. If you run the script while a leftover json from a DIFFERENT
-// final test exists, that old data is detected as stale and IGNORED (fresh
-// pass, no review hints, no bogus confidence boost) — the file is then
-// overwritten with the new test's own data. You don't need to delete it
-// yourself.
+// Site behavior this relies on: docs/platform-notes.md#final-test
+
+// Read-only by default. A Final Test has one attempt.
 const OUTPUT_PATH = './final-test-answers.md';
 const ANSWERS_PATH = './final-test-answers.json';
 
-// The attempt URL's path (sans the #/question-N hash, which changes every
-// pill) identifies which final test the answers were scraped from. It's
-// written alongside the answers so a later run can tell "same test, review
-// it" from "different test — the old json is stale, ignore it".
+// The path without the #/question-N hash identifies the test.
 function testIdFromUrl(url) {
   return (url || '').split('#')[0];
 }
@@ -75,20 +32,7 @@ function loadPreviousAnswers(testId, filePath = ANSWERS_PATH) {
   }
 }
 
-// Merges a fresh, independent pass with the previous pass's record. The whole
-// point of the review loop is that a SINGLE self-assessed confidence is
-// unreliable — an overconfident first guess must not commit the one attempt.
-// Two passes agreeing is the verification signal: confidence is lifted well
-// above what either pass claimed alone. Two passes disagreeing is the
-// opposite signal: the new answer is recorded (the reviewer may have caught a
-// real mistake) but its confidence is crushed, so it can never auto-click.
-//
-// Also tracks `agreements` — how many consecutive passes have agreed on the
-// current answer (1 for a brand-new answer, +1 for each later pass that
-// confirms it, reset to 1 when the answer changes). FINAL_TEST_REVIEWS_REQUIRED
-// turns that into a hard gate: auto-click needs BOTH confidence >= threshold
-// AND agreements >= reviewsRequired, so a high-confidence-but-only-once answer
-// still never clicks until enough independent passes have ratified it.
+// Agreeing passes raise confidence and count agreements. A disagreement halves the lower confidence.
 function combineReview(previous, current) {
   if (!previous || previous.answer === 'NEEDS REVIEW') return { ...current, agreements: 1 };
   if (current.answer === 'NEEDS REVIEW') return previous;
@@ -135,13 +79,7 @@ const ANSWER_INSTRUCTION =
   'Determine the single correct option letter for this question, using the passage/question text and options provided. ' +
   'Respond as JSON: { "answer": "<letter>", "confidence": <0.0 to 1.0> }.';
 
-// When a previous pass's answer exists, the model re-derives the question from
-// scratch rather than just ratifying what it saw — it's told the earlier
-// suggestion only so it can actively disagree with it, and told its confidence
-// must reflect its own fresh judgment, not agreement with that earlier answer.
-// combineReview() then applies the real weighting (two agreeing passes lift
-// confidence, a disagreement caps it), so the prompt staying neutral on the
-// previous answer is what keeps the review genuinely independent.
+// The review prompt stays neutral. combineReview does the weighting.
 function reviewInstruction(previous) {
   return (
     'A previous review pass suggested answer ' +
@@ -152,16 +90,7 @@ function reviewInstruction(previous) {
   );
 }
 
-// A single LLM guess per question — there's no per-question feedback to loop
-// on (unlike runners/exercise.js's retry-with-feedback) and only one real
-// attempt exists, so retries here are purely for transient call failures
-// (matches src/answerLoop.js's callWithRetry), not for trying a different
-// answer. Exhausting retries marks the question for manual review instead of
-// throwing, so one bad question can't abort the other 49. Also asks for a
-// self-assessed confidence (0..1) — an answer at/above confidenceThreshold is
-// safe to auto-click, anything below goes to the manual answer key.
-// When previousAnswer is supplied (a prior run's record for this question),
-// the model is asked to review rather than answer fresh.
+// One answer per question. Retries cover transient call failures only.
 async function answerWithRetry(llmClient, model, questionData, { answerQuestionFn = answerQuestion, maxAttempts = 3, sleepFn = (ms) => new Promise((r) => setTimeout(r, ms)), previousAnswer = null } = {}) {
   const instruction = previousAnswer
     ? `${ANSWER_INSTRUCTION} ${reviewInstruction(previousAnswer)}`
@@ -181,9 +110,6 @@ async function answerWithRetry(llmClient, model, questionData, { answerQuestionF
   return { answer: 'NEEDS REVIEW', confidence: 0 };
 }
 
-// Clicks the option button whose text starts with the given letter (the
-// final test's MCQ rows are `button.bl-w-full.justify-content-start`, same
-// shape as a checkpoint's), without any Check/Save — the caller decides.
 async function clickOptionByLetter(driver, letter) {
   await driver.switchTo().defaultContent();
   return driver.executeScript(
@@ -205,19 +131,7 @@ async function saveAndWait(driver, n) {
   return waitForPillSaved(driver, n);
 }
 
-// Walks every pill 1..N (N read live, not hardcoded), parsing and guessing
-// each question. Read-only unless autoAnswer is enabled: only pill navigation
-// touches the DOM by default, no option/Save/Submit click ever happens.
-// With autoAnswer=true and an answer whose confidence clears
-// confidenceThreshold, the option is clicked and the answer saved on the spot
-// (still one attempt — an overconfident guess can't be undone). Everything
-// below threshold stays in the markdown key for manual answering.
-// When previousAnswers (a prior run's records) is supplied, each question is
-// re-derived independently and combined via combineReview — see the
-// MULTI-PASS REVIEW note at the top of this file.
-// pillDomLookupFn/getCurrentQuestionDomFn
-// are separated (rather than one combined call) so tests can fake per-pill
-// DOM content without a real driver.
+// Read-only unless autoAnswer is on. pillDomLookupFn lets tests fake per-pill DOM.
 async function scrapeFinalTest(
   driver,
   {
@@ -259,17 +173,8 @@ async function scrapeFinalTest(
 
   const records = [];
   for (const { n } of pills) {
-    // clickPillFn's return value used to be discarded — a failed click
-    // (verified live: the whole run silently stalled on one pill's content
-    // for every subsequent question, with no error, because a later click
-    // never registered) left every following iteration re-reading that same
-    // stale page instead of the actual next question. Retry a few times and
-    // bail loudly instead of scraping the wrong question under a new number.
-    //
-    // The pill nav also re-collapses to its default ~12-pill view after
-    // landing on some questions (live-verified after Q11/Q12) — expanding
-    // once before the loop starts isn't enough, so re-expand on every
-    // retry before clicking again.
+    // A dropped pill click would re-read the same question, and the pill nav re-collapses,
+    // so re-expand and retry.
     let clicked = false;
     for (let attempt = 1; attempt <= 3 && !clicked; attempt += 1) {
       if (!pillDomLookupFn) await ensurePillsExpandedFn(driver);
@@ -283,16 +188,8 @@ async function scrapeFinalTest(
 
     let dom = pillDomLookupFn ? pillDomLookupFn(n) : await getCurrentQuestionDomFn(driver, { iframeWaitMs: 600 });
 
-    // Comparing each read against the *previous question's* DOM (an earlier
-    // version of this fix) doesn't work — outerHTML carries enough
-    // incidental noise (ids, timestamps) that back-to-back reads of the
-    // very same still-loading question already differ from the prior
-    // question's snapshot, so that comparison was satisfied immediately
-    // without ever actually waiting. What's live-verified instead: a
-    // question that's still mid-render answers two reads spaced apart with
-    // different content each time (it's actively changing), while a
-    // settled one answers identically — so require two consecutive reads,
-    // changePollMs apart, to agree before trusting the DOM.
+    // Trust the DOM once two reads changePollMs apart match. outerHTML noise makes
+    // comparing to the previous question useless.
     if (!pillDomLookupFn) {
       const deadline = Date.now() + changeWaitMs;
       let previous = dom.outerHTML;

@@ -1,8 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-// When a dashboard (src/dashboard.js) is active, JSON lines would just
-// corrupt its rendered UI, so output is redirected there instead of stdout.
+// JSON lines would corrupt the dashboard, so it takes the output instead.
 let sink = null;
 function setSink(nextSink) {
   sink = nextSink;

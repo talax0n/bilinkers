@@ -1,12 +1,7 @@
 const { answerQuestion } = require('./llm');
 const logger = require('./logger');
 
-// LLM/proxy calls occasionally fail transiently (verified live: an
-// OpenAI-compatible proxy intermittently 403'd with a voucher/billing
-// error, then succeeded on the very next identical call seconds later) —
-// retried here, separately from the question-level retry loop below, so a
-// blip like that doesn't burn one of the exercise's limited answer attempts
-// while never actually clicking a new answer.
+// Retries transient LLM/proxy failures so they don't use up an answer attempt.
 async function callWithRetry(fn, args, driver, maxAttempts = 3) {
   let lastErr;
   for (let i = 0; i < maxAttempts; i += 1) {
@@ -39,14 +34,8 @@ async function processQuestion({
   let attempts = 0;
   let feedback = null;
   let outcome = 'incorrect';
-  // Some quiz pages show the same static hint text regardless of which
-  // wrong option was tried (verified live: a True/False/Not-Given question
-  // gave the identical hint after both "True" and "False" were tried and
-  // marked incorrect) — each retry call is a stateless, independent LLM
-  // request with no memory of earlier attempts, so without tracking this
-  // itself the model can re-guess an option it already tried and got wrong.
-  // Ruled-out answers are listed explicitly in the feedback so elimination
-  // actually converges instead of only working by chance.
+  // Some pages repeat one hint for every wrong option, and each LLM call is stateless,
+  // so ruled-out answers are listed explicitly.
   const triedAnswers = [];
 
   while (attempts <= retryLimit) {
@@ -59,9 +48,6 @@ async function processQuestion({
       logger.info('Attempt: submitting answer', { handler: handler.name, attempt: attempts + 1, answer: attemptedAnswer });
       await handler.answer(driver, llmResult);
       const checkResult = await handler.checkResult(dom);
-      // checkResult may be a bare outcome string, or { outcome, hint } when
-      // the handler can surface the page's own explanation for why an
-      // answer was wrong (see _optionButtons.js's waitForCheckFeedback).
       const { outcome: resolvedOutcome, hint } = typeof checkResult === 'string' ? { outcome: checkResult, hint: null } : checkResult;
       outcome = resolvedOutcome;
       if (outcome !== 'correct' && outcome !== 'incorrect') {

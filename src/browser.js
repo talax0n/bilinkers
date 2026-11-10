@@ -4,8 +4,6 @@ const { resolveChromedriverPath } = require('./chromedriver');
 
 const LMS_HOST = 'lms.binus.ac.id';
 
-// Attaches to the browser src/cli.js launched with --remote-debugging-port=9222
-// and focuses its LMS tab. CHROMEDRIVER_PATH overrides chromedriver auto-detection.
 async function attachToLms() {
   const options = new chrome.Options();
   options.debuggerAddress('localhost:9222');
@@ -33,19 +31,8 @@ async function waitForUrlChange(driver, previousUrl, timeoutMs) {
   return null;
 }
 
-// The LTI player injects its content iframe via JS after load, so it isn't
-// there yet on the first check right after a question/page transition.
-//
-// Opening an activity also briefly renders, inside that same iframe: first
-// an intermediate "LTI launcher" page (a hidden auto-submitting form, id
-// "ltiForm", POSTing off to the actual Bits player), then — even after that
-// POST completes and the Bits app itself has loaded — an empty <main
-// id="content"> for a beat while its JS populates the slide/question into
-// it. Caught in either state, the page has no question markers and no #/n
-// link, so it was previously misread as an unanswerable/unhandled page.
-// Re-checking (with fresh iframe lookups, since navigation happens inside
-// the iframe's own document rather than replacing the <iframe> element
-// itself) waits both out instead.
+// The iframe is injected late. Inside it, a launcher form (#ltiForm) and then an empty
+// #content render before the question, so wait both out with fresh iframe lookups.
 async function getCurrentQuestionDom(driver, { iframeWaitMs = 30000, iframePollMs = 200, launcherWaitMs = 30000 } = {}) {
   await driver.switchTo().defaultContent();
 
@@ -83,13 +70,7 @@ async function getCurrentQuestionDom(driver, { iframeWaitMs = 30000, iframePollM
   }
 
   const outerHTML = await driver.executeScript('return document.documentElement ? document.documentElement.outerHTML : null');
-  // A past listening question's MuiSlider-root audio player is left mounted
-  // (just visually hidden, not removed) once the SPA moves on to a later
-  // question — matching purely on outerHTML substring then keeps matching
-  // audioMultipleChoice forever after the first real listening question,
-  // even though its markup no longer represents the current question.
-  // offsetParent is null for any element that (or whose ancestor) is
-  // display:none, so this only counts a slider that's actually on-screen.
+  // Earlier listening sliders stay mounted but hidden, so only count a visible one.
   const hasVisibleSlider = await driver.executeScript(`
     return [...document.querySelectorAll('.MuiSlider-root')].some((el) => el.offsetParent !== null);
   `);

@@ -46,14 +46,7 @@ async function selectOptionAndCheck(driver, letter) {
   `);
 }
 
-// Returns { outcome, hint }, not a bare string: an incorrect answer here
-// (verified live on a True/False/Not-Given reading question) comes with a
-// specific explanation right next to "Incorrect!" — e.g. "Revisit the
-// passage to determine if Jenna's role in organizing the pantry was
-// mentioned." — sitting in a sibling div right after the heading's own
-// wrapper. Surfacing it lets a retry attempt be told exactly what to
-// reconsider instead of just "try again", which otherwise tends to produce
-// the same guess repeatedly on subtler true/false/not-given judgment calls.
+// The hint next to "Incorrect!" is returned so the retry can use it.
 async function waitForCheckFeedback(driver) {
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {

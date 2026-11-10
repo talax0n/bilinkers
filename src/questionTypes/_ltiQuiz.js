@@ -1,8 +1,4 @@
-// The author-written instruction text (task description, tense/rule notes,
-// worked examples) is consistently styled in this teal in the Bits editor,
-// regardless of question type or exact wording — extracting by that
-// signature instead of matching specific phrases means it survives wording
-// changes between questions.
+// Author instructions are always styled in this teal in the Bits editor, whatever the wording.
 function extractInstructionText(html) {
   const matches = [...html.matchAll(/color:rgb\(26, 106, 132\)">([\s\S]*?)<\/span>/g)];
   const stripTags = (fragment) =>

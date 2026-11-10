@@ -5,30 +5,12 @@ const audioMultipleChoice = require('../questionTypes/audioMultipleChoice');
 const readingComprehension = require('../questionTypes/readingComprehension');
 const logger = require('../logger');
 
-// This script attaches to an already-running Chromium-based browser (Chrome,
-// Brave, Edge) launched with --remote-debugging-port=9222, and drives a
-// checkpoint (see the "ENG-B1.2 ... Checkpoint 1" gate screenshot: Total
-// Question 30, Passing Score 100, Maximum Attempt Unlimited) end to end:
-// click the gate's Start/Continue button, answer every question, submit,
-// check the resulting score, and — since the platform allows unlimited
-// attempts — retry the whole checkpoint from the gate if the score falls
-// short of 100, up to a safety cap. Run via `node src/cli.js
-// checkpoint`, or invoke this file directly if the browser is already up
-// and sitting on a checkpoint's gate page.
+// Site behavior this relies on: docs/platform-notes.md#checkpoint
 
-// Platform policy is genuinely unlimited attempts, so keep retrying wrong
-// scores forever — only an unhandled question type (a structural gap, not
-// an unlucky guess) stops the loop early.
-
-// Per-pill brute-force letters cycle A..F so elimination stays unbounded
-// (unlimited attempts) even in the unlikely event it hasn't converged by F.
+// One letter per attempt, cycling A..F. Attempts repeat without limit until the score is 100.
 const LETTERS = ['A', 'B', 'C', 'D', 'E', 'F'];
 
-// The gate button's text isn't fixed: "Start Attempt 1" on a fresh
-// checkpoint, "Start Attempt N" on a later one, or "Continue" if an attempt
-// is already in progress (verified live — screenshot showed a Continue
-// button distinct from Start Attempt N) — matched by prefix/exact text
-// rather than one literal string.
+// "Start Attempt N" for a new attempt, "Continue" for one in progress.
 async function clickGateButton(driver, timeoutMs = 8000) {
   await driver.switchTo().defaultContent();
   const deadline = Date.now() + timeoutMs;
@@ -48,34 +30,13 @@ async function clickGateButton(driver, timeoutMs = 8000) {
   return false;
 }
 
-// The last question has no "Save & Next" — instead it shows a per-question
-// "Save" *and* a checkpoint-wide "Submit" side by side (verified live).
-// "Save" only re-saves the current selection without finalizing anything —
-// clicking it was the original bug here, since it comes before "Submit" in
-// DOM order and looked like a valid advance button. "Submit" is the one
-// that actually finalizes the checkpoint, gated behind an "Are you sure?"
-// Yes/No confirm, same shape as runners/exercise.js's native-exercise finishing
-// sequence (but with no further "Next" afterward — the very next render is
-// the result page).
-// The Submit click has the same silent-drop race as every other click this
-// codebase has hit live (pill nav, Save, quizMatching's submit): a click that
-// doesn't register leaves the attempt page exactly as it was, no confirm modal,
-// no error. A single click attempt then burns the whole attempt's worth of
-// answering for nothing when waitForScore below times out. So the Submit click
-// is retried: click Submit, poll for the "Are you sure?" Yes confirm; if the
-// confirm never shows within the window, the Submit click didn't land, so
-// click it again. Returns true only once the confirm modal actually appeared
-// and was confirmed — a false return is now a real "submit did not go
-// through" signal the caller surfaces instead of ignoring.
+// Submit exists only on the last question, next to a Save that does not finalize.
+// Clicks can drop silently, so retry until the Yes confirm appears.
 async function clickSubmit(driver, { maxSubmitClicks = 3, confirmWaitMs = 8000, enabledWaitMs = 4000, logger: injectedLogger = logger } = {}) {
   await driver.switchTo().defaultContent();
 
   for (let submitAttempt = 1; submitAttempt <= maxSubmitClicks; submitAttempt += 1) {
-    // A transiently-disabled Submit is NOT a failure — the save's network
-    // call can still be settling and leave the button disabled for a moment
-    // (verified live everywhere else in this file: pill/save clicks race the
-    // same re-render). Poll for it to become enabled before declaring this
-    // attempt dead.
+    // Submit can stay disabled briefly while the last save settles.
     const deadline = Date.now() + enabledWaitMs;
     let clicked = false;
     while (Date.now() < deadline) {
@@ -87,9 +48,6 @@ async function clickSubmit(driver, { maxSubmitClicks = 3, confirmWaitMs = 8000, 
       `);
       if (clicked) break;
       if (clicked === null) {
-        // Not rendered yet — keep polling within the window rather than
-        // giving up on the first sighting; the last-pill navigation + render
-        // can still be settling.
         await driver.sleep(200);
         continue;
       }
@@ -116,19 +74,14 @@ async function clickSubmit(driver, { maxSubmitClicks = 3, confirmWaitMs = 8000, 
       await driver.sleep(200);
     }
 
-    // No Yes confirm within the window — the Submit click never registered
-    // (same race as the pill/save clicks). Retry the whole Submit+confirm.
+    // No confirm, so the Submit click dropped. Retry.
     await driver.sleep(300);
   }
 
   return false;
 }
 
-// Confirming Submit lands directly on ".../result/version/{id}" (no
-// "/review" needed just for the number), reading e.g. "...Sorry, Try
-// Again.Your Score:83Correct25Incorrect5No Answer0..." — the score sits
-// right after "Your Score:" with no separator (verified live: a checkpoint
-// that missed 5 of 30 questions read "Your Score:83").
+// The score follows "Your Score:" with no separator, e.g. "Your Score:83Correct25".
 async function waitForScore(driver, timeoutMs = 10000) {
   await driver.switchTo().defaultContent();
   const deadline = Date.now() + timeoutMs;
@@ -143,22 +96,7 @@ async function waitForScore(driver, timeoutMs = 10000) {
   return undefined;
 }
 
-// Checkpoints never show a per-question "Correct!"/"Incorrect!" heading, only
-// a final score after submitting everything — so there's no live signal to
-// brute-force a question in place. Instead it's brute-forced ACROSS attempts:
-// answer every still-wrong pill, submit, and the platform re-presents (via
-// isPillLocked, not disappearance — a checkpoint keeps showing every pill,
-// just locks the correct ones) only the still-incorrect ones as editable on
-// the next attempt (verified live). Each attempt uses ONE SHARED letter for
-// every unlocked pill (A, then B, then C, ...), chosen by main() — the
-// shared-letter brute force: correctness is only knowable next attempt, so a
-// single letter per attempt is the simplest convergence model. No LLM
-// involved either way.
-// Reads the checkpoint's numbered nav pills (1..N). Every pill is a
-// '.bl-button__container' with a numeric label — keyed off that class (not a
-// set of background colours) so pills in any state are counted, including the
-// tan-bordered ones a colour whitelist missed (verified live: a colour filter
-// found only 16 of 30).
+// Pills are counted by class, not colour. A colour filter missed the tan-bordered ones.
 async function readPills(driver) {
   return driver.executeScript(`
     const seen = {}, out = [];
@@ -174,9 +112,7 @@ async function readPills(driver) {
   `);
 }
 
-// The checkpoint initially renders only 15 pills. Its unlabeled down-chevron
-// button expands the rest; identify that control by its icon and position next
-// to the pill grid, then verify expansion by observing the pill count grow.
+// Only 15 pills render at first. The unlabeled chevron right of the grid expands the rest.
 async function ensurePillsExpanded(driver, timeoutMs = 3000) {
   await driver.switchTo().defaultContent();
   const before = await readPills(driver);
@@ -222,13 +158,7 @@ async function clickPill(driver, n) {
   );
 }
 
-// Locked (already-correct) pills carry 'success-shade-color' and never gain
-// 'secondary-shade-color' when clicked — the app apparently doesn't render
-// into an already-locked question, so waitForPillActive can never succeed
-// for one (verified live: clicking an already-correct pill left it
-// success-shade-color, no active-state transition, yet nothing was actually
-// stuck). Checked before navigating so locked pills are skipped outright
-// instead of being treated as a failed pill transition.
+// Locked (correct) pills never turn active when clicked, so skip them before navigating.
 async function isPillLocked(driver, n) {
   return driver.executeScript(
     `
@@ -258,11 +188,7 @@ async function waitForPillActive(driver, n, timeoutMs = 5000) {
   return false;
 }
 
-// Clicking a pill to advance was found to occasionally leave the just-answered
-// question unsaved (Submit at question 30 not reflecting it) — so an explicit
-// Save is now fired after every answer too, on top of the pill navigation,
-// belt-and-suspenders. Matches "Save" or "Save & Next" (label varies by
-// attempt type), never "Submit" (only the checkpoint-wide Submit finalizes).
+// Pill navigation alone sometimes left an answer unsaved, so Save after each answer.
 async function clickSaveButton(driver) {
   await driver.switchTo().defaultContent();
   return driver.executeScript(`
@@ -276,13 +202,7 @@ async function clickSaveButton(driver) {
   `);
 }
 
-// Save fires a network call; clicking the next pill before it lands can get
-// swallowed by the save's own re-render (verified live: pill navigation then
-// stalls on some later, unrelated pill — a race, not a fixed bad pill). Poll
-// until the just-saved pill drops its "unanswered" marker
-// (primary-light-shade-color, same class the completion-pass check below
-// uses) before moving on, so navigation only ever starts once the save has
-// actually landed.
+// Wait for the save to land. A pill click during its re-render can be swallowed.
 async function waitForPillSaved(driver, n, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -313,21 +233,7 @@ async function answerEveryGroup(driver, letter) {
   );
 }
 
-// Brute-forces one checkpoint attempt. Navigation is by clicking each
-// numbered pill 1..N directly; each answer is locked in with an explicit
-// Save click right after selecting it (relying on the pill transition alone
-// to save was found to sometimes drop question 30's answer before Submit).
-// A pill whose options are all locked is already correct from a previous
-// attempt — skipped, so its correct answer is preserved.
-//
-// Uses a SHARED letter for every unlocked pill this attempt (one attempt =
-// one letter, chosen by main() from LETTERS: A, then B, then C, ...). The
-// checkpoint has no per-question feedback, so correctness is only knowable
-// on the NEXT attempt — correct pills lock (isPillLockedFn) and drop out of
-// the run, and the platform re-presents only still-incorrect pills as
-// editable. Cycling one shared letter across attempts is the brute-force
-// blocking model: each round answers everything still wrong with a fresh
-// letter until the whole checkpoint is correct.
+// One shared letter per attempt. Correct pills lock and are skipped on the next attempt.
 async function answerAllQuestions(
   driver,
   letter,
@@ -352,11 +258,7 @@ async function answerAllQuestions(
   registry.register(readingComprehension);
 
   await getCurrentQuestionDomFn(driver);
-  // The gate's Continue click can land the attempt page before its pills
-  // have rendered — verified live: a single fixed post-click sleep found
-  // zero pills, while re-checking a couple seconds later on the same
-  // (already-navigated) page found 25+. Polled here instead of one fixed
-  // wait, so a slow render doesn't get misread as "no gate/no questions".
+  // Pills can render well after the gate click, so poll.
   let pills = [];
   let reloaded = false;
   for (;;) {
@@ -369,11 +271,7 @@ async function answerAllQuestions(
     }
     if (pills.length > 0 || reloaded) break;
 
-    // Distinct from slow rendering: the LMS occasionally serves "Failed to
-    // load Assessment type / Please contact Beelingua Support" instead of
-    // the attempt (verified live after resuming an in-progress attempt) — a
-    // plain page reload cleared it and the pills rendered normally. Only
-    // retried once; a second failure is a real problem, not a glitch.
+    // "Failed to load Assessment type" is a transient glitch. One reload clears it.
     const failedToLoad = await driver.executeScript(`return document.body.innerText.includes('Failed to load Assessment type')`);
     if (!failedToLoad) break;
     injectedLogger.warn('Checkpoint: page failed to load the assessment — reloading once', {});
@@ -389,24 +287,12 @@ async function answerAllQuestions(
 
   let answered = 0;
   let previousUnanswered = null;
-  // Brute-force blocking with a SHARED letter: every unlocked pill this
-  // attempt is answered with the same letter (A, then B on the next attempt,
-  // ...). The checkpoint has no per-question feedback — only the final score
-  // — so a question's correctness is only knowable on the NEXT attempt via
-  // isPillLockedFn (correct pills lock and get skipped; the platform
-  // re-presents only still-incorrect pills as editable). One shared letter per
-  // attempt keeps the model simple: the outer attempt loop in main() picks
-  // the letter, and correct pills dropping out each round is the convergence.
   for (let completionPass = 1; completionPass <= maxCompletionPasses; completionPass += 1) {
     for (const { n } of pills) {
       await ensurePillsExpandedFn(driver);
-      if (await isPillLockedFn(driver, n)) continue; // already correct — no click, no active-state to wait for
+      if (await isPillLockedFn(driver, n)) continue; // locked means already correct
 
-      // A pill click occasionally doesn't register on the first try — same
-      // class of race as the Save/Submit clicks above (verified live: a
-      // pill reported "did not settle" mid-run, then answered normally on a
-      // plain re-click seconds later with nothing else changed). Retried
-      // once here before treating it as a genuine stall.
+      // A pill click sometimes doesn't register. Retry once.
       let settled = (await clickPillFn(driver, n)) && (await waitForPillActiveFn(driver, n));
       if (!settled) {
         settled = (await clickPillFn(driver, n)) && (await waitForPillActiveFn(driver, n));
@@ -416,8 +302,7 @@ async function answerAllQuestions(
         return { status: 'unhandled', questionNum: answered };
       }
 
-      // Checkpoint questions render top-level (no iframe), so don't burn the
-      // default 8s iframe wait on every pill.
+      // Questions render top-level, so use a short iframe wait.
       const dom = await getCurrentQuestionDomFn(driver, { iframeWaitMs: 600 });
       const handler = registry.findHandler(dom);
       if (!handler) {
@@ -425,14 +310,8 @@ async function answerAllQuestions(
         continue;
       }
 
-      // waitForPillActiveFn above only confirms the PILL itself is marked
-      // active — it says nothing about whether the question's own answer
-      // buttons have finished rendering yet. A single immediate check here
-      // can catch them still mid-render (all momentarily disabled), which
-      // this code otherwise reads as "already locked" and silently skips —
-      // no click, no log line, indistinguishable from a genuinely-solved
-      // pill. Poll for a couple seconds first so a slow render isn't
-      // mistaken for a locked question.
+      // Options can still be mid-render (all disabled) after the pill turns active.
+      // Poll so they aren't mistaken for a locked question.
       let optionCount = 0;
       const enabledDeadline = Date.now() + 2000;
       while (Date.now() < enabledDeadline) {
@@ -440,7 +319,7 @@ async function answerAllQuestions(
         if (optionCount > 0) break;
         await driver.sleep(150);
       }
-      if (optionCount === 0) continue; // already correct (locked) — leave it
+      if (optionCount === 0) continue; // locked, already correct
 
       const attemptLetter = String(letter);
       try {
@@ -451,9 +330,7 @@ async function answerAllQuestions(
         answered += 1;
         injectedLogger.info('Checkpoint question answered', { pill: n, type: handler.name, letter: attemptLetter, selected, completionPass });
       } catch (err) {
-        // A pill with fewer options than this attempt's letter (e.g. a
-        // 3-option TFNG on an "E" round) has nothing to click — the next
-        // attempt's letter may fit it.
+        // Fewer options than this letter (e.g. a 3-option TFNG on an E round). A later letter may fit.
         injectedLogger.info('Checkpoint question has no option for this letter — will retry with the next letter next attempt', {
           pill: n,
           letter: attemptLetter,
@@ -472,17 +349,7 @@ async function answerAllQuestions(
     if (unanswered.length === 0) break;
 
     injectedLogger.warn('Checkpoint: unanswered pills remain after completion pass', { unanswered, completionPass, maxCompletionPasses });
-    // Neither case here is a structural gap (registry.findHandler already
-    // covers that, above) — it just means the current letter genuinely
-    // doesn't apply to whatever's left (e.g. a 3-option question on an "F"
-    // round). Previously this returned 'unhandled', which the outer
-    // attempt-retry loop in main() treats as fatal and stops the whole
-    // checkpoint — verified live: a checkpoint that was legitimately
-    // converging (score climbing 40 -> 60 across letters) got killed here
-    // on attempt 6 instead of submitting its partial answers and letting
-    // the next letter keep going. So this now just stops iterating passes
-    // and falls through to the normal Submit below, same as if every pill
-    // had resolved cleanly.
+    // Leftover pills just don't fit this letter. Submit what is answered instead of failing.
     if (previousUnanswered && unanswered.length >= previousUnanswered.length) {
       injectedLogger.info('Checkpoint: unanswered pills made no progress this letter — submitting what is answered', {
         unanswered,
@@ -503,15 +370,7 @@ async function answerAllQuestions(
     }
   }
 
-  // The checkpoint-wide Submit button ONLY exists on the last question's
-  // screen — earlier questions show just the per-question Save (verified
-  // live: "The last question has no Save & Next — instead it shows a
-  // per-question Save and a checkpoint-wide Submit side by side"). The Save
-  // click fired after each answer navigates erratically (its next-jump goes
-  // to the next *unanswered* question), so after the completion-pass loop the
-  // browser is NOT necessarily sitting on the last pill anymore — and without
-  // it there's no Submit button to click. Navigate back to the last pill
-  // first so clickSubmit actually has something to click.
+  // Submit exists only on the last pill, and Save & Next may have jumped elsewhere.
   const lastPill = pills[pills.length - 1];
   if (lastPill) {
     await ensurePillsExpandedFn(driver);
@@ -533,10 +392,6 @@ async function runCheckpointAttempt(driver, letter) {
     return { status: 'unhandled', questionNum: answerResult.questionNum };
   }
   if (answerResult.status === 'submit-failed') {
-    // The Submit click never landed (or the confirm never appeared) — no
-    // result page is coming, so don't burn waitForScore's timeout pretending
-    // an attempt happened. Surface it so main can decide instead of treating
-    // it as a completed-but-wrong attempt.
     return { status: 'submit-failed', questionNum: answerResult.questionNum };
   }
 
@@ -549,11 +404,6 @@ async function main(existingDriver, { runExerciseFn = runCheckpointAttempt } = {
   const driver = existingDriver || (await attachToLms());
   const gateUrl = await driver.getCurrentUrl();
 
-  // Brute-force blocking: one shared letter per attempt, advancing A -> B ->
-  // C -> ... on each retry. Correct pills from earlier attempts stay locked
-  // and are skipped inside answerAllQuestions, so each new letter only has to
-  // handle what's still wrong. Letters wrap around LETTERS for unlimited
-  // attempts.
   let letterIndex = 0;
   let submitFailures = 0;
 
@@ -572,19 +422,13 @@ async function main(existingDriver, { runExerciseFn = runCheckpointAttempt } = {
     logger.info('Checkpoint attempt finished', { attempt, ...result });
 
     if (result.status === 'unhandled') {
-      // A structural gap, not a wrong guess — retrying hits the same
-      // unhandled question type again, so stop right away instead of
-      // burning attempts against the cap.
+      // Structural, not a wrong guess. A retry would hit the same page.
       logger.warn('Unhandled question type inside checkpoint — stopping', { attempt, questionNum: result.questionNum });
       return { status: 'unhandled', attempt, questionNum: result.questionNum };
     }
 
     if (result.status === 'submit-failed') {
-      // The attempt page's per-pill answers were saved individually, so a
-      // retry from the gate (Continue) resumes the same attempt with its
-      // answers intact and only needs to land Submit. But a submit that
-      // fails 3 times in a row is a real problem, not a transient click
-      // race — stop rather than burn attempts against a broken button.
+      // Saved answers survive, so Continue resumes the attempt. Three failed submits in a row stop the run.
       submitFailures += 1;
       logger.warn('Checkpoint: submit did not go through — retrying from the gate', { attempt, submitFailures });
       if (submitFailures >= 3) {

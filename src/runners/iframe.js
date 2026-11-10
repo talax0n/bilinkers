@@ -10,38 +10,19 @@ const { processQuestion } = require('../answerLoop');
 const { createClient, answerQuestion } = require('../llm');
 const logger = require('../logger');
 
-// errorAnalysis has no entry here — it's answered by brute force
-// (createBruteForceAnswerer below), not an LLM call, so no format note is
-// ever read for it.
+// Site behavior this relies on: docs/platform-notes.md#lti-iframe-player
+
 const FORMAT_NOTES = {
-  // The on-screen instruction's own worked example shows the answer written
-  // out inside a full sentence (e.g. "Answer: ... I will be travelling to
-  // Surabaya.") — without this, the model pattern-matches that shape and
-  // returns the whole sentence instead of just the blank-filler words
-  // (verified live: an input ended up holding "I think he is going to win
-  // the race..." instead of just "is going to win").
+  // The on-screen worked example answers in a full sentence, and the model copies that shape.
   fillInBlank:
     'Return ONLY the word(s) that fill the blank(s) — never the surrounding sentence, even though the worked example above shows the answer inside a full sentence. If multiple blanks, return {"answers": [...]} in order (each entry just the words for that one blank); if one blank, return {"answer": "..."} with just those words.',
 };
 
-// Neither question type has a fixed task — the on-screen instruction (read
-// straight off the page into questionData.instructionText by the parser,
-// since wording and the graded tense/rule vary per question) is the only
-// source of truth for what to do, used verbatim rather than guessed at.
+// Wording and the graded rule vary per question, so the on-screen instruction is used verbatim.
 function buildInstruction(handler, questionData) {
   const onScreenInstruction = questionData.instructionText || 'Answer the question as shown.';
   return `${onScreenInstruction} ${FORMAT_NOTES[handler.name] || ''}`;
 }
-
-// This script attaches to an already-running Chromium-based browser (Chrome,
-// Brave, Edge) launched with --remote-debugging-port=9222 and answers every
-// question inside the currently open Beelingua LTI-embedded activity (Bits
-// player), advancing via the iframe's own "Continue" link. Unlike
-// runners/exercise.js (the native MUI app), this activity's Check-once-per-load
-// UI means a wrong answer cannot be retried in place, so retryLimit is 0
-// here. Run via `node src/cli.js iframe`, which handles the browser
-// launch + login wait for you, or invoke this file directly if the browser
-// is already up.
 
 async function clickContinue(driver) {
   return driver.executeScript(`
@@ -82,10 +63,7 @@ async function waitForActivityChange(driver, previous, timeoutMs = 60000) {
   return null;
 }
 
-// A wrong answer locks this activity's Check-once UI: the "Continue" link
-// stays hidden and re-checking doesn't re-evaluate. The only way forward is
-// the SPA's own hash router, which accepts direct navigation regardless of
-// what's visually unlocked.
+// Not called. The SPA hash router accepts #/question-N even when a wrong answer hides Continue.
 async function goToNextQuestionByHash(driver) {
   const currentUrl = await driver.executeScript('return window.location.href');
   const match = currentUrl.match(/#\/question-(\d+)/);
@@ -105,14 +83,7 @@ async function advance(driver, previousState, timeoutMs = 60000) {
   return false;
 }
 
-// errorAnalysis is answered by brute force instead of an LLM call: try every
-// non-empty candidate-letter combination in increasing subset size (A, B,
-// ..., A+B, A+C, ...), one per retry, until Check passes. Simpler and more
-// reliable than reasoning about grammar through a model — there are at most
-// a handful of candidates, so exhausting them is cheap, and answerLoop.js's own
-// retry loop (one attempt per call here) already drives the "try next,
-// check, repeat" sequence. A fresh instance per question keeps the attempt
-// counter from leaking across questions.
+// errorAnalysis brute force. Try letter subsets by size (A, B, ..., A+B, ...), one per retry.
 function getLetterCombinations(letters) {
   const combinations = [];
 
@@ -156,15 +127,14 @@ function createBruteForceAnswerer() {
   };
 }
 
-// Detection order matters: registry.findHandler() returns the first match.
-// The strategy belongs to this runner, not the type: checkpoint.js and
-// final-test.js solve the same pages differently.
+// registry.findHandler() returns the first match, so order matters.
+// The strategy belongs to this runner. checkpoint.js and final-test.js solve the same pages differently.
 const QUESTION_TYPES = [
   { type: fillInBlank, solve: 'llm' },
   { type: errorAnalysis, solve: 'letter-combinations' },
   // Answer derived from the page's own data-drag/data-drag-target indexes.
   { type: quizMatching, solve: 'from-page' },
-  // Ungraded slides: answer() clicks #/n itself, so the generic advance() is skipped.
+  // Ungraded slides. answer() clicks #/n itself, so the generic advance() is skipped.
   { type: vocabularyIntro, solve: 'click-through' },
 ];
 const SOLVE_BY_NAME = new Map(QUESTION_TYPES.map(({ type, solve }) => [type.name, solve]));
@@ -175,10 +145,6 @@ function answererFor(solve) {
   return async () => ({});
 }
 
-// existingDriver lets an orchestrator (runners/unit.js) drive one continuous
-// browser session across several activities instead of each script
-// re-attaching its own driver; standalone invocation (via cli.js or `node
-// src/runners/iframe.js` directly) still attaches its own as before.
 async function main(existingDriver) {
   const driver = existingDriver || (await attachToLms());
   const registry = createRegistry();
@@ -193,9 +159,7 @@ async function main(existingDriver) {
     const dom = await getCurrentQuestionDom(driver);
     const activityState = await readActivityState(dom.driver);
 
-    // The activity's final slide ("You can now close this activity and
-    // continue to the next one") has no #/n link and no quiz markers, so it
-    // never matches a registered type — that's expected, not an error.
+    // The closing slide matches no handler. That is the normal end.
     if (dom.outerHTML.includes('You can now close this activity')) {
       logger.info('Reached activity closing screen — done', { questions: questionNum });
       return { status: 'complete', questionNum };
@@ -210,8 +174,7 @@ async function main(existingDriver) {
     }
 
     const solve = SOLVE_BY_NAME.get(handler.name);
-    // Vocabulary slides sit between real questions; walking them without
-    // counting keeps the question tally honest.
+    // Vocabulary slides are walked without counting them as questions.
     if (solve === 'click-through') {
       await handler.answer(dom.driver);
       await dom.driver.sleep(100 + Math.random() * 100);
@@ -220,8 +183,7 @@ async function main(existingDriver) {
 
     questionNum += 1;
 
-    // Reading/thinking delay before answering, so submissions don't land
-    // suspiciously instantly after the question loads.
+    // Short reading delay so submissions don't land instantly.
     await dom.driver.sleep(100 + Math.random() * 100);
 
     const questionData = handler.parse(dom);

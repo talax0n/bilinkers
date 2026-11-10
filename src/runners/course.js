@@ -3,32 +3,9 @@ const logger = require('../logger');
 const { run: runUnit } = require('./unit');
 const { run: runCheckpoint } = require('./checkpoint');
 
-// This script attaches to an already-running Chromium-based browser and
-// drives a whole course level's roadmap (see the isometric city map
-// screenshot: a zig-zag road of hexagon nodes — "Unit 1", "Unit 2",
-// "Checkpoint 1", "Unit 3", ... — with a header readout "Unit 4/8  CP 1/3
-// FT 0/1") end to end: open the next unfinished Unit or Checkpoint, run the
-// matching bot (runners/unit.js or runners/checkpoint.js) on the same browser
-// session, come back to the map, repeat. Run via `node src/cli.js
-// course`, or invoke this file directly if the browser is already up and
-// sitting on a course's roadmap page (the URL with no /session/{id} suffix).
-// Final Test is deliberately never opened — excluded by construction (the
-// node whitelist below only ever matches "Unit N" / "Checkpoint N").
+// Site behavior this relies on: docs/platform-notes.md#course-roadmap
 
-// Each roadmap node is a rasterized PNG (hexagon colour/lock-state/checkmark
-// baked into the image itself, verified live: no colour or state ever shows
-// up as a class or attribute) sitting inside a ".hoverable-pointer" div, with
-// the plain-text label ("Unit8", "Checkpoint3", ...) as a sibling text node
-// in the same container — so state can't be read from the DOM directly.
-// Decoding it isn't needed though: the header readout ("Unit 4/8  CP 1/3")
-// already gives exact completed counts, and course order is fixed and
-// derivable from each node's absolute "top" pixel position (verified live:
-// sorting descending by top produced exactly Unit1, Unit2, Checkpoint1,
-// Unit3, Unit4, Checkpoint2, Unit5, Unit6, Checkpoint3, Unit7, Unit8 — which
-// matches the roadmap screenshot's visual order and the header's progress
-// counts). Locked nodes are still safe to click "by mistake": verified live,
-// clicking a locked node's URL never changes, which the driving loop below
-// already treats as "nothing more is reachable, stop".
+// Node state is baked into PNGs. Order comes from each node's top offset.
 async function readCourseNodes(driver) {
   await driver.switchTo().defaultContent();
   const nodes = await driver.executeScript(`
@@ -40,10 +17,7 @@ async function readCourseNodes(driver) {
     });
   `);
 
-  // Whitelisted, not blacklisted: only "Unit N" / "Checkpoint N" labels are
-  // ever recognised, so a "Final Test" node (or anything else) is excluded
-  // by construction regardless of what it's labelled or whether it even
-  // exists in the DOM yet.
+  // Whitelist, so the Final Test node is never opened.
   const parsed = nodes
     .map((n) => {
       const unitMatch = n.label.match(/^Unit(\d+)$/i);
@@ -54,8 +28,7 @@ async function readCourseNodes(driver) {
     })
     .filter(Boolean);
 
-  // Descending top = ascending course order (verified live — see comment
-  // above).
+  // Descending top is course order.
   parsed.sort((a, b) => b.top - a.top);
   return parsed;
 }
@@ -89,9 +62,6 @@ async function clickNode(driver, label) {
   );
 }
 
-// existingDriver lets a caller (or a future higher-level orchestrator) drive
-// one continuous browser session; standalone invocation still attaches its
-// own as before. The rest are injectable for testing without a real driver.
 async function main(
   existingDriver,
   {
@@ -110,11 +80,7 @@ async function main(
   const attempted = new Set();
 
   for (;;) {
-    // The roadmap is still loading for a beat right after navigating back to
-    // it (live-verified: a fixed 1500ms post-navigation sleep wasn't always
-    // enough — an immediate read here caught 0 nodes and null progress even
-    // though the same page read fine moments later), so a single miss isn't
-    // trusted as "genuinely missing" — poll for a few seconds first.
+    // The roadmap may still be loading after navigating back, so poll before giving up.
     const readDeadline = Date.now() + readRetryMs;
     let nodes;
     let progress;
@@ -156,11 +122,7 @@ async function main(
 
     const navigated = await waitForUrlChangeFn(driver, beforeUrl, 10000);
     if (!navigated) {
-      // Either genuinely locked (the frontier the header counters implied
-      // doesn't match what the roadmap will actually let us open — the
-      // platform's own lock rules win), or a click landed on the road/deco
-      // image instead of a real node. Either way nothing more is reachable
-      // right now.
+      // Locked node, or the click hit decoration. Nothing more is reachable.
       logger.warn('Course node did not open (URL never changed) — stopping', { label: next.label });
       return { status: 'stuck', label: next.label };
     }

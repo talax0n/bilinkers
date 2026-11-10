@@ -75,21 +75,8 @@ async function answer(driver, llmResult) {
   `);
 }
 
-// The generic .correct.timeout/.incorrect.timeout markers _ltiQuiz.js's
-// waitForQuizFeedback watches don't reliably reflect this "sa" (short
-// answer) quiz type's actual result — verified live: a genuinely correct
-// answer ('were rainy', confirmed by the platform's own "Continue" link
-// going live and the input staying filled with it) still flashed the
-// .incorrect banner for ~2s on the way there, indistinguishable in timing
-// from a truly wrong answer's flash. So the incorrect banner is treated as
-// pure noise here, not a signal — .quiz-next-btn visibility (the same
-// element advance()/clickContinue() already act on once a question passes)
-// is the only thing trusted as "correct"; anything else by the deadline is
-// "incorrect" (a timeout, not an exception — this quiz type has no reliable
-// live signal for a wrong answer, only the absence of the right one). The
-// submit click also occasionally doesn't register with the app's grading —
-// a second click on the same button partway through the wait covers that,
-// same fix already applied to quizMatching for the same click race.
+// The .incorrect banner flashes even on correct answers, so only .quiz-next-btn counts.
+// Submit is re-clicked once in case the first click dropped.
 async function checkResult(dom) {
   const driver = dom.driver;
   const deadline = Date.now() + 5000;

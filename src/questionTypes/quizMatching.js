@@ -12,17 +12,8 @@ function parse(dom) {
   return { instructionText: extractInstructionText(dom.outerHTML) };
 }
 
-// Drag-and-drop word-bank questions: drag each vocabulary option onto its
-// matching blank. The app's own grading (checkQuizMatching in app.js) does
-// nothing smarter than `dropzone.data-filled === dropzone.data-drag-target`
-// — the correct draggable for a blank is simply whichever one carries that
-// same index as its data-drag id, with distractors carrying indexes that
-// never match any blank on the page. That makes the fill deterministic by
-// DOM structure, which is used here instead of a real simulated mouse drag:
-// interact.js's internal drag/drop state didn't reliably register synthetic
-// WebDriver pointer events in testing (dropzone stayed empty, Check stayed
-// disabled), while writing the same end state their own onDrop handler
-// produces is indistinguishable to the grading code.
+// Synthetic drags don't register with interact.js. Grading only compares data-filled
+// to data-drag-target, so write that end state directly.
 async function answer(driver) {
   const filled = await driver.executeScript(`
     let count = 0;
@@ -56,19 +47,8 @@ async function answer(driver) {
   `);
 }
 
-// The generic .correct.timeout/.incorrect.timeout markers _ltiQuiz.js's
-// waitForQuizFeedback watches (built for the mc/sa quiz types) don't
-// reliably show for this matching variant in testing — verified live: after
-// a correct fill+submit, both stayed display:none the whole 5s window while
-// .quiz-next-btn (the same element advance()/clickContinue() already act on
-// once a question passes) went visible immediately. That's the real signal
-// here, so it's checked directly instead.
-// The submit click in answer() occasionally doesn't register with the app's
-// grading (verified live: fill was correct, #quiz-submit-btn stayed enabled
-// and unclicked-looking, checkResult timed out — a second click on the same
-// button immediately flipped .quiz-next-btn visible). So checkResult
-// re-clicks Submit once, partway through its wait, instead of only ever
-// clicking it the one time from answer().
+// The banners often stay hidden, so a visible .quiz-next-btn is the signal.
+// Submit is re-clicked once in case the first click dropped.
 async function checkResult(dom) {
   const driver = dom.driver;
   const deadline = Date.now() + 20000;

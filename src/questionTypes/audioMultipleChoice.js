@@ -4,11 +4,8 @@ const name = 'audioMultipleChoice';
 
 function detect(dom) {
   const html = dom.outerHTML;
-  // A stale (visually hidden) slider from an earlier listening question can
-  // still be present in outerHTML — dom.hasVisibleSlider checks it's
-  // actually on-screen instead of just anywhere in the markup. Falls back
-  // to the substring check when hasVisibleSlider isn't set (e.g. a fixture
-  // dom without live visibility info).
+  // Hidden sliders from earlier listening questions stay in outerHTML.
+  // Fixture DOMs without hasVisibleSlider fall back to the substring check.
   const hasSlider = dom.hasVisibleSlider !== undefined ? dom.hasVisibleSlider : html.includes('MuiSlider-root');
   return hasSlider && html.includes('bl-w-full justify-content-start');
 }

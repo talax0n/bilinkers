@@ -7,16 +7,7 @@ const { attachToLms } = require('./browser');
 const logger = require('./logger');
 const { isGroupedReadingLayout, groupedReadingLayoutFromDocument } = require('./groupedReading');
 
-// One-command entry point: launches your Chromium-based browser with remote
-// debugging on, waits for you to log in and open the exercise, then runs the
-// matching bot script. Usage: node src/cli.js [exercise|iframe|reading|unit|checkpoint|course|final-test] [url]
-// Mode is optional — if omitted, it's auto-detected from the page after you
-// press Enter (the native MUI exercise, an LTI-embedded iframe activity, and
-// a unit's own activity list all have distinct, unambiguous DOM markers), so
-// you don't have to know which one to pick. For `unit`, open the unit page
-// (e.g. "Unit 2", the list of activity rows — not a single exercise) before
-// pressing Enter; it walks every unfinished row, running exercise/iframe on
-// each in turn.
+// Usage: node src/cli.js [mode] [url]. Mode is auto-detected when omitted.
 const DEFAULT_BINARY_PATHS = {
   darwin: {
     chrome: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -82,22 +73,7 @@ function waitForEnter(promptText) {
   });
 }
 
-// Three page kinds share this app's chrome (header, nav icons, the unit's
-// own row list), all built from the same MuiButtonBase/.bl-w-full
-// components — checking for those generically (as this used to) matches
-// every page, including the unit list itself, and always misclassifies it
-// as 'exercise' before ever getting a chance to check for an iframe or the
-// row list. Checked in order of how unambiguous each signal actually is:
-//   1. iframe present -> 'iframe' (the LTI/Bits player only ever appears
-//      wrapped in an iframe, so this is independent of the app chrome noise)
-//   2. iframe reading -> 'reading'
-//   3. checkpoint gate -> 'checkpoint'
-//   4. top-level grouped reading -> 'reading'
-//   5. generic top-level option buttons -> 'exercise'
-//   6. two or more 'button.bl-w-full' rows each carrying a
-//      '.bl-text-ellipsis' title label -> 'unit' (verified live against
-//      the "Unit 2" activity list: exactly this shape, no iframe, no
-//      lettered options)
+// Checked in order. App chrome (MuiButtonBase, .bl-w-full) is on every page, so only specific markers count.
 async function detectMode() {
   const driver = await attachToLms();
 
@@ -114,11 +90,7 @@ async function detectMode() {
     ) {
       return 'iframe';
     }
-    // The reading BlExercise (passage + numbered 1..N tiles, lettered
-    // option buttons) is ALSO iframe-embedded, but uses the MUI
-    // 'bl-w-full justify-content-start' option buttons rather than the
-    // Bits player's quiz-input-* markup — so it's distinguished from a
-    // native (top-level) 'exercise' by living inside the iframe.
+    // A reading BlExercise is also iframe-embedded but uses MUI option buttons, not quiz-input-*.
     if (iframeHtml.includes('bl-w-full justify-content-start')) {
       return 'reading';
     }
@@ -127,11 +99,7 @@ async function detectMode() {
 
   const topHtml = await driver.executeScript('return document.documentElement.outerHTML');
 
-  // A checkpoint's gate page ("ENG-B1.2 - INDEPENDENT (V2) - Checkpoint 1",
-  // Total Question/Passing Score/Maximum Attempt, a "Start Attempt N" or
-  // "Continue" button) has the exact same shape as a plain exercise's
-  // BlExercise gate — "Checkpoint" in the heading is the one thing that
-  // tells them apart, so that's the check, not the generic gate markers.
+  // A checkpoint gate looks like an exercise gate. Only the word "Checkpoint" differs.
   const isCheckpointGate = await driver.executeScript(`
     const hasCheckpointHeading = /Checkpoint/i.test(document.body.textContent);
     const buttons = Array.from(document.querySelectorAll('button'));
@@ -145,10 +113,6 @@ async function detectMode() {
     return 'checkpoint';
   }
 
-  // A course's roadmap (the isometric city map: "Unit 1", "Checkpoint 1",
-  // ... hexagon nodes) renders each node as a rasterized PNG inside a
-  // '.hoverable-pointer' div with a plain-text label sibling — unique to
-  // this page, not shared with the unit/exercise/checkpoint chrome.
   const isCourseMap = await driver.executeScript(`
     return [...document.querySelectorAll('.hoverable-pointer')].some((el) =>
       /^(Unit|Checkpoint)\\d+$/i.test(el.textContent.replace(/\\s+/g, '').trim())
@@ -210,9 +174,6 @@ async function main() {
     console.log(`Detected: ${mode}`);
   }
 
-  // The plain JSON-line logger and a live OpenTUI dashboard both fight for
-  // the same terminal, so the dashboard only takes over when running
-  // interactively (a real TTY) — piped/CI output keeps the JSON lines.
   let dashboard = null;
   if (process.stdout.isTTY && !process.env.NO_TUI) {
     const { createDashboard } = require('./dashboard');
