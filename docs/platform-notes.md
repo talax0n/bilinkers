@@ -46,15 +46,21 @@ Inside a unit, after a row is opened and its gate passed, `src/runners/unit.rs` 
 
 ## Island map (Beelingua home)
 
-- `https://lms.binus.ac.id/beelingua` shows the eight courses B1.1 to C2.2 as `.hoverable-pointer` nodes. Whitespace-stripped labels match `^[BC]\d\.\d$`. (src/detect.rs, detectMode has no mode for this page.)
+- `https://lms.binus.ac.id/beelingua` shows the eight courses B1.1 to C2.2 as `.hoverable-pointer` nodes. Whitespace-stripped labels match `^[BC]\d\.\d$`. (src/detect.rs, PageMode::Island)
 - A JS `click()` on a node does nothing (verified 2026-11-10). A real pointer click (CDP mouse events at the element's center) opens a side panel instead of navigating.
 - The panel contains the heading `ENG-<label>`. A **View Unit List** button means the course is unfinished. Only **View Course Detail** means it is complete. Either button navigates to that course's roadmap at `/beelingua/student/class/<id>`.
 - An open panel can cover other nodes. Reload the home page before opening the next one.
+- Each node's `<img>` has `alt` set to the course's status (verified 2026-11-10). The live map with every course complete showed `alt="done"` on all eight. The site's bundle renders `<img src={icons[status]} alt={course.status}>` with icons for `done`, `locked` and `progress`, so completion is read without clicking. (src/runners/island.rs, CourseState::from_marker)
+- The marker mapping is `done` complete, `locked` locked, `progress` or `notStarted` unfinished. Only `done` was seen live; the others come from the bundle. Any other value falls back to the panel.
+- On a completed course the panel's buttons are only "View Course Detail" (verified 2026-11-10 on B1.1 with a CDP pointer click, then a reload left 8 nodes on the map).
+- A locked node does not open the panel; its click asks the site for "closed" info instead. The island runner never clicks a node whose marker says locked.
+- The island runner (`bilinkers island`, or Start on this page) reads B1.1 to C2.2 in label order, opens the first unfinished one through "View Unit List", runs the course runner on it, reloads home and repeats. Each course is opened at most once per run. It stops when a course run is stuck. With nothing unfinished at the start it ends as `all-courses-complete`.
 
 ## Course roadmap
 
 - The roadmap is an isometric city map. A zig-zag road of hexagon nodes ("Unit 1", "Unit 2", "Checkpoint 1", "Unit 3", ...) with a header readout like "Unit 4/8  CP 1/3  FT 0/1". Its URL has no `/session/{id}` suffix.
 - Each node is a rasterized PNG inside a `.hoverable-pointer` div, with the label as a sibling text node ("Unit8", "Checkpoint3" once whitespace is removed). Colour, lock state and checkmark are baked into the image. No class or attribute shows state. (src/runners/course.rs, readCourseNodes)
+- Correction (verified 2026-11-10): roadmap node images also carry `alt` with the unit's status (`alt="done"` on every node of a finished course, the Final Test node included). The bundle sets it from `unit.status` (`locked`, `notStarted`, `progress`, `done`). The course runner still uses the header counts.
 - Progress comes from the header instead. `Unit\s*(\d+)\s*/\s*(\d+)` and `CP\s*(\d+)\s*/\s*(\d+)` on `document.body.innerText` give done and total counts. (src/runners/course.rs, readProgress)
 - Course order is fixed. Sorting nodes by the `style.top` of their first descendant with `top` in its style, descending, gives course order. Verified live order: Unit1, Unit2, Checkpoint1, Unit3, Unit4, Checkpoint2, Unit5, Unit6, Checkpoint3, Unit7, Unit8. This matches the visual order and the header counts.
 - The next node is the first in order whose number is greater than the done count for its type and that has not been tried in this run.
