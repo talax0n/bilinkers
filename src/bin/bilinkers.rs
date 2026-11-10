@@ -193,7 +193,8 @@ mod window {
         ensure_browser, BrowserSetup, Connection, RunHandle, RunMode, Sighting, Watcher, STOPPED,
     };
     use bilinkers::setup::{
-        codex_status, save_settings, search_this_machine, spawn_codex_login, BrowserPick, CodexStatus, EnvLayers,
+        codex_login_log, codex_status, login_failure, save_settings, search_this_machine, spawn_codex_login,
+        BrowserPick, CodexStatus, EnvLayers,
     };
     use bilinkers::ui::{BrowserStep, Host, StartInfo};
 
@@ -272,7 +273,14 @@ mod window {
                     Ok(None) => continue,
                     Ok(Some(status)) => {
                         login.take();
-                        return if status.success() { Ok(()) } else { Err(format!("Codex exited with {status}.")) };
+                        if status.success() {
+                            return Ok(());
+                        }
+                        let stderr = std::fs::read_to_string(codex_login_log()).unwrap_or_default();
+                        return Err(match login_failure(&stderr) {
+                            Some(line) => format!("Codex exited with {status}: {line}"),
+                            None => format!("Codex exited with {status}."),
+                        });
                     }
                     Err(e) => {
                         login.take();

@@ -39,13 +39,13 @@ impl CodexStatus {
         };
         // Codex 0.167 prints the status on stderr, older builds on stdout.
         let line = first_line(&output.stdout).or_else(|| first_line(&output.stderr));
-        match output.status.code() {
-            Some(0) if line.as_deref().is_some_and(|l| l.to_ascii_lowercase().contains("not logged in")) => {
-                CodexStatus::SignedOut
-            }
-            Some(0) => CodexStatus::SignedIn(line.unwrap_or_else(|| "Logged in".to_string())),
-            Some(1) => CodexStatus::SignedOut,
-            code => CodexStatus::Failed(line.unwrap_or_else(|| format!("codex exited with {code:?}"))),
+        // Exit 1 alone is not "signed out": a codex that cannot run (a Windows npm shim with no
+        // node, a missing native package) also exits 1, and must not pose as a missing sign-in.
+        let signed_out = line.as_deref().is_some_and(|l| l.to_ascii_lowercase().contains("not logged in"));
+        match (output.status.code(), signed_out) {
+            (Some(0 | 1), true) => CodexStatus::SignedOut,
+            (Some(0), false) => CodexStatus::SignedIn(line.unwrap_or_else(|| "Logged in".to_string())),
+            (code, _) => CodexStatus::Failed(line.unwrap_or_else(|| format!("codex exited with {code:?}"))),
         }
     }
 }
@@ -99,13 +99,28 @@ fn codex_command(args: &[&str]) -> Command {
 
 /// Runs `codex login status`. Never reads Codex's own credential files.
 pub fn codex_status() -> CodexStatus {
-    CodexStatus::from_output(codex_command(&["login", "status"]).output())
+    match CodexStatus::from_output(codex_command(&["login", "status"]).output()) {
+        CodexStatus::Failed(e) => CodexStatus::Failed(format!("{e} (ran {})", codex_program().0.display())),
+        status => status,
+    }
 }
 
 /// Starts `codex login`, which opens the system browser for the ChatGPT sign-in and exits when
 /// it is done; the caller waits on (or kills) the child.
 pub fn spawn_codex_login() -> std::io::Result<std::process::Child> {
-    codex_command(&["login"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
+    let log = std::fs::File::create(codex_login_log())?;
+    codex_command(&["login"]).stdout(Stdio::null()).stderr(log).spawn()
+}
+
+/// Where `spawn_codex_login` sends Codex's stderr. A file, not a pipe, so a chatty Codex can
+/// never block on a full pipe while the caller only polls `try_wait`.
+pub fn codex_login_log() -> PathBuf {
+    std::env::temp_dir().join("bilinkers-codex-login.log")
+}
+
+/// The last non-empty line of a failed `codex login`'s stderr, which is where Codex says why.
+pub fn login_failure(stderr: &str) -> Option<String> {
+    stderr.lines().map(str::trim).rfind(|l| !l.is_empty()).map(str::to_string)
 }
 
 /// A browser the bot can drive, by its BROWSER key.
@@ -465,6 +480,14 @@ mod tests {
     use super::*;
     use std::process::ExitStatus;
 
+    #[test]
+    fn login_failure_is_codexs_last_line() {
+        let stderr =
+            "Starting local login server on http://localhost:1455.\n\nError logging in: Token exchange failed\n\n";
+        assert_eq!(login_failure(stderr).as_deref(), Some("Error logging in: Token exchange failed"));
+        assert_eq!(login_failure("\n  \n"), None);
+    }
+
     #[cfg(unix)]
     fn exit(code: i32) -> ExitStatus {
         std::os::unix::process::ExitStatusExt::from_raw(code << 8)
@@ -492,6 +515,15 @@ mod tests {
         );
         assert_eq!(CodexStatus::from_output(output(1, "", "Not logged in\n")), CodexStatus::SignedOut);
         assert_eq!(CodexStatus::from_output(output(0, "Not logged in", "")), CodexStatus::SignedOut);
+        assert_eq!(
+            CodexStatus::from_output(output(1, "", "Error: Cannot find module '@openai/codex-win32-x64'\n")),
+            CodexStatus::Failed("Error: Cannot find module '@openai/codex-win32-x64'".into()),
+            "a codex that cannot run is not a signed-out one"
+        );
+        assert_eq!(
+            CodexStatus::from_output(output(1, "", "")),
+            CodexStatus::Failed("codex exited with Some(1)".into())
+        );
         assert_eq!(
             CodexStatus::from_output(output(2, "", "error: unknown flag")),
             CodexStatus::Failed("error: unknown flag".into())
