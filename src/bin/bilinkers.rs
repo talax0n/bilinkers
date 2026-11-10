@@ -250,6 +250,15 @@ mod window {
             codex_status()
         }
 
+        fn install_codex(&self) -> Result<(), String> {
+            let installed = bilinkers::install::install_here().map_err(|e| e.to_string())?;
+            bilinkers::logger::info(
+                "Installed Codex",
+                [("path", installed.path.display().to_string().into()), ("tag", installed.tag.into())],
+            );
+            Ok(())
+        }
+
         fn sign_in(&self) -> Result<(), String> {
             let child = spawn_codex_login().map_err(|e| format!("Codex could not start: {e}"))?;
             *self.login.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);

@@ -27,6 +27,8 @@ use style::{button, palette, Kind};
 pub trait Host: Send + Sync {
     /// Worker: `codex login status`.
     fn codex_status(&self) -> CodexStatus;
+    /// Worker: downloads Codex into the app's bin dir.
+    fn install_codex(&self) -> Result<(), String>;
     /// Worker: `codex login`, until the sign-in in the system browser ends.
     fn sign_in(&self) -> Result<(), String>;
     /// UI thread: the installed browsers and what the settings resolve to.
@@ -71,6 +73,7 @@ pub struct Ui {
     host: Arc<dyn Host>,
     events: Arc<Mutex<Receiver<Event>>>,
     codex: Latest<CodexStatus>,
+    installed: Latest<Result<(), String>>,
     signed_in: Latest<Result<(), String>>,
     probe: Latest<Connection>,
     opened: Latest<Result<(), String>>,
@@ -87,6 +90,7 @@ fn send(s: &mut Ui, input: Input, tx: &mut Tx) {
         let host = s.host.clone();
         match effect {
             Effect::CheckCodex => s.codex.request((), move |()| host.codex_status()),
+            Effect::InstallCodex => s.installed.request((), move |()| host.install_codex()),
             Effect::SignIn => s.signed_in.request((), move |()| host.sign_in()),
             Effect::CheckBrowsers => {
                 let browsers = host.browsers();
@@ -132,6 +136,9 @@ fn poll(s: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
     if let Some(status) = s.codex.take() {
         send(s, Input::CodexChecked(status), tx);
     }
+    if let Some(result) = s.installed.take() {
+        send(s, Input::CodexInstalled(result), tx);
+    }
     if let Some(result) = s.signed_in.take() {
         send(s, Input::SignInDone(result), tx);
     }
@@ -165,6 +172,7 @@ fn poll(s: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
 
 fn setup(s: &mut Ui, waker: Waker) {
     s.codex.set_waker(waker.clone());
+    s.installed.set_waker(waker.clone());
     s.signed_in.set_waker(waker.clone());
     s.probe.set_waker(waker.clone());
     s.opened.set_waker(waker.clone());
@@ -201,6 +209,7 @@ fn new_ui(info: StartInfo, host: Arc<dyn Host>, events: Receiver<Event>) -> Ui {
         host,
         events: Arc::new(Mutex::new(events)),
         codex: Latest::default(),
+        installed: Latest::default(),
         signed_in: Latest::default(),
         probe: Latest::default(),
         opened: Latest::default(),
@@ -319,17 +328,25 @@ mod demo {
     /// up to the last one.
     pub struct FakeHost {
         pub sighting: Sighting,
+        /// What Install Codex ends with.
+        pub install: Result<(), String>,
     }
+
+    pub const INSTALL_FAILED: &str = "Download failed: curl: (6) Could not resolve host: github.com";
 
     impl Default for FakeHost {
         fn default() -> FakeHost {
-            FakeHost { sighting: unit_page() }
+            FakeHost { sighting: unit_page(), install: Ok(()) }
         }
     }
 
     impl Host for FakeHost {
         fn codex_status(&self) -> CodexStatus {
             signed_in()
+        }
+
+        fn install_codex(&self) -> Result<(), String> {
+            self.install.clone()
         }
 
         fn sign_in(&self) -> Result<(), String> {
@@ -401,13 +418,13 @@ mod demo {
     }
 
     fn waiting(s: &mut Ui, sighting: Sighting) {
-        s.host = Arc::new(FakeHost { sighting: sighting.clone() });
+        s.host = Arc::new(FakeHost { sighting: sighting.clone(), ..FakeHost::default() });
         s.flow.screen = Screen::Waiting(Waiting::Looking(Some(sighting)));
     }
 
     fn home(s: &mut Ui, sighting: Sighting) {
-        s.host = Arc::new(FakeHost { sighting: sighting.clone() });
-        s.flow.connection = FakeHost { sighting }.probe();
+        s.host = Arc::new(FakeHost { sighting: sighting.clone(), ..FakeHost::default() });
+        s.flow.connection = FakeHost { sighting, ..FakeHost::default() }.probe();
     }
 
     type Scene = (&'static str, fn(&mut Ui));
@@ -416,6 +433,8 @@ mod demo {
         ("welcome-empty", |s| welcome(s, Codex::Known(CodexStatus::SignedOut), nothing_installed())),
         ("welcome-signing-in", |s| welcome(s, Codex::SigningIn, brave())),
         ("welcome-missing-codex", |s| welcome(s, Codex::Known(CodexStatus::Missing), brave())),
+        ("welcome-installing", |s| welcome(s, Codex::Installing, brave())),
+        ("welcome-install-failed", |s| welcome(s, Codex::InstallFailed(INSTALL_FAILED.into()), brave())),
         ("welcome-done", |s| welcome(s, Codex::Known(signed_in()), brave())),
         ("welcome-locked", |s| {
             let locked = BrowserStep::new(
@@ -598,6 +617,64 @@ mod tests {
     }
 
     #[test]
+    fn install_codex_shows_progress_then_the_sign_in_or_why_it_failed() {
+        struct Missing(demo::FakeHost);
+        impl Host for Missing {
+            fn codex_status(&self) -> CodexStatus {
+                CodexStatus::SignedOut
+            }
+            fn install_codex(&self) -> Result<(), String> {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                self.0.install_codex()
+            }
+            fn sign_in(&self) -> Result<(), String> {
+                self.0.sign_in()
+            }
+            fn browsers(&self) -> BrowserStep {
+                self.0.browsers()
+            }
+            fn save_browser(&self, pick: &BrowserPick) -> Result<BrowserStep, String> {
+                self.0.save_browser(pick)
+            }
+            fn probe(&self) -> Connection {
+                self.0.probe()
+            }
+            fn open_browser(&self) -> Result<(), String> {
+                self.0.open_browser()
+            }
+            fn watch(&self, classify: bool) -> Sighting {
+                self.0.watch(classify)
+            }
+            fn start(&self, mode: RunMode) {
+                self.0.start(mode)
+            }
+            fn stop(&self) {
+                self.0.stop()
+            }
+        }
+        for install in [Err(demo::INSTALL_FAILED.to_string()), Ok(())] {
+            let info = StartInfo { codex: CodexStatus::Missing, ..demo::info() };
+            let host = Missing(demo::FakeHost { install: install.clone(), ..demo::FakeHost::default() });
+            let mut rt = runtime(new_ui(info, Arc::new(host), mpsc::channel().1), false);
+            rt.frame(0.0);
+            assert_eq!(shown(&rt, "codex-status-text").as_deref(), Some(welcome::CODEX_MISSING));
+            assert!(rt.find("sign-in").is_none());
+            click(&mut rt, "install-codex");
+            assert_eq!(shown(&rt, "codex-status-text").as_deref(), Some(welcome::INSTALLING));
+            frames_until(&mut rt, |s| !matches!(s.flow.codex, flow::Codex::Installing | flow::Codex::Checking));
+            if install.is_err() {
+                let failed = format!("Codex could not be installed. {}", demo::INSTALL_FAILED);
+                assert_eq!(shown(&rt, "codex-status-text"), Some(failed));
+                assert_eq!(shown(&rt, "codex-manual").as_deref(), Some(welcome::MANUAL_INSTALL));
+                assert!(rt.find("retry-install").is_some());
+            } else {
+                assert_eq!(shown(&rt, "codex-status-text").as_deref(), Some("Not signed in yet."));
+                assert!(rt.find("sign-in").is_some(), "Sign in with ChatGPT comes next");
+            }
+        }
+    }
+
+    #[test]
     fn the_welcome_screen_lists_each_found_browser_with_its_path() {
         let info = StartInfo { codex: CodexStatus::SignedOut, ..demo::info() };
         let mut rt = runtime(ui(info, demo::FakeHost::default(), mpsc::channel().1), false);
@@ -614,7 +691,10 @@ mod tests {
     fn the_island_map_starts_the_all_courses_run() {
         let island = Some(PageKind::Mode(crate::detect::PageMode::Island));
         let sighting = demo::page("Beelingua", "https://lms.binus.ac.id/beelingua/", island);
-        let mut rt = runtime(ui(demo::info(), demo::FakeHost { sighting }, mpsc::channel().1), false);
+        let mut rt = runtime(
+            ui(demo::info(), demo::FakeHost { sighting, ..demo::FakeHost::default() }, mpsc::channel().1),
+            false,
+        );
         rt.frame(0.0);
         click(&mut rt, "start");
         frames_until(&mut rt, |s| matches!(s.flow.screen, Screen::Running(_)));
@@ -657,7 +737,10 @@ mod tests {
     #[test]
     fn a_final_test_page_is_refused_in_the_window() {
         let test = demo::page("Final Test", "https://lms.binus.ac.id/x", Some(PageKind::FinalTest));
-        let mut rt = runtime(ui(demo::info(), demo::FakeHost { sighting: test }, mpsc::channel().1), true);
+        let mut rt = runtime(
+            ui(demo::info(), demo::FakeHost { sighting: test, ..demo::FakeHost::default() }, mpsc::channel().1),
+            true,
+        );
         rt.frame(0.0);
         click(&mut rt, "start");
         frames_until(&mut rt, |s| matches!(&s.flow.screen, Screen::Waiting(flow::Waiting::Looking(Some(_)))));
@@ -670,8 +753,14 @@ mod tests {
 
     #[test]
     fn home_shows_what_start_will_do() {
-        let mut rt =
-            runtime(ui(demo::info(), demo::FakeHost { sighting: Sighting::NotRunning }, mpsc::channel().1), false);
+        let mut rt = runtime(
+            ui(
+                demo::info(),
+                demo::FakeHost { sighting: Sighting::NotRunning, ..demo::FakeHost::default() },
+                mpsc::channel().1,
+            ),
+            false,
+        );
         rt.frame(0.0);
         frames_until(&mut rt, |s| s.flow.connection == Connection::NotRunning);
         assert_eq!(shown(&rt, "codex-line-text").as_deref(), Some("Signed in"));

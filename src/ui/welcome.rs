@@ -9,8 +9,11 @@ use crate::ui::style::{
 };
 use crate::ui::{send, Ui};
 
-pub const CODEX_INSTALL: &str =
-    "Codex is not installed. Install it with npm i -g @openai/codex (or from the Codex CLI page), then press Retry.";
+pub const CODEX_MISSING: &str =
+    "Codex is not installed. Install Codex downloads it from OpenAI's GitHub releases into this app's folder.";
+pub const INSTALLING: &str = "Downloading Codex...";
+pub const MANUAL_INSTALL: &str =
+    "You can also install it yourself with npm i -g @openai/codex, then press Check again.";
 pub const SIGNING_IN: &str = "Waiting for sign-in in your browser...";
 pub const NONE_FOUND: &str =
     "Searched this computer for Google Chrome, Brave, Microsoft Edge and Chromium and found none. Choose the browser program instead.";
@@ -63,6 +66,14 @@ fn status_line(key: &str, color: Color, message: String, p: &Palette) -> El {
         .child(text(message).key(format!("{key}-text")).font(font::BODY).color(p.ink).grow(1.0).min_w(0.0).wrap())
 }
 
+/// Check again (after installing by hand) beside the primary install button.
+fn install_actions(key: &str, label: &str, p: &Palette) -> El {
+    let check =
+        button("check-codex", "Check again", Kind::Secondary, true, p, |s: &mut Ui, tx| send(s, Input::CheckCodex, tx));
+    let install = button(key, label, Kind::Primary, true, p, |s: &mut Ui, tx| send(s, Input::InstallCodex, tx));
+    row().gap(space::SM).center_y().child(check).child(install)
+}
+
 fn codex_step(flow: &Flow, p: &Palette) -> El {
     let sign_in = |enabled: bool, label: &str| {
         button("sign-in", label, Kind::Primary, enabled, p, |s: &mut Ui, tx| send(s, Input::SignIn, tx))
@@ -74,17 +85,24 @@ fn codex_step(flow: &Flow, p: &Palette) -> El {
         Codex::Known(CodexStatus::SignedOut) => {
             (p.ink_3, "Not signed in yet.".to_string(), Some(sign_in(true, "Sign in with ChatGPT")))
         }
+        Codex::Installing => {
+            let busy = button("install-codex", "Installing", Kind::Primary, false, p, |_: &mut Ui, _| {});
+            (p.accent, INSTALLING.to_string(), Some(busy))
+        }
         Codex::Known(CodexStatus::Missing) => {
-            let retry = button("retry-codex", "Retry", Kind::Secondary, true, p, |s: &mut Ui, tx| {
-                send(s, Input::CheckCodex, tx)
-            });
-            (p.warn, CODEX_INSTALL.to_string(), Some(retry))
+            (p.warn, CODEX_MISSING.to_string(), Some(install_actions("install-codex", "Install Codex", p)))
+        }
+        Codex::InstallFailed(e) => {
+            (p.bad, format!("Codex could not be installed. {e}"), Some(install_actions("retry-install", "Retry", p)))
         }
         Codex::Known(CodexStatus::Failed(e)) => {
             (p.warn, format!("Could not check your sign-in: {e}"), Some(sign_in(true, "Sign in with ChatGPT")))
         }
     };
     let mut body = col().w_full().gap(6.0).child(status_line("codex-status", color, message, p));
+    if matches!(flow.codex, Codex::InstallFailed(_)) {
+        body = body.child(text(MANUAL_INSTALL).key("codex-manual").font(font::BODY).color(p.ink_2).px(8.0).wrap());
+    }
     if let Some(e) = &flow.codex_error {
         body = body.child(
             text(format!("Sign-in did not finish: {e}"))

@@ -60,8 +60,8 @@ pub fn home(flow: &Flow, p: &Palette) -> El {
     let setup = button("setup", "Setup", Kind::Secondary, true, p, |s: &mut Ui, tx| send(s, Input::OpenSetup, tx));
     let (codex_color, codex_text) = match &flow.codex {
         Codex::Known(CodexStatus::SignedIn(_)) => (p.good, "Signed in".to_string()),
-        Codex::Known(_) => (p.warn, "Not signed in. Open Setup to sign in.".to_string()),
-        Codex::Checking | Codex::SigningIn => (p.ink_3, "Checking...".to_string()),
+        Codex::Known(_) | Codex::InstallFailed(_) => (p.warn, "Not signed in. Open Setup to sign in.".to_string()),
+        Codex::Checking | Codex::SigningIn | Codex::Installing => (p.ink_3, "Checking...".to_string()),
     };
     let browser = &flow.browser.setup;
     let (browser_color, browser_text) = match &browser.binary {

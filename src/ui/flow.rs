@@ -40,6 +40,10 @@ pub enum Waiting {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Codex {
     Checking,
+    /// Install Codex was pressed; the download has not finished.
+    Installing,
+    /// The install failed with this reason; Retry installs again.
+    InstallFailed(String),
     /// `codex login` is waiting on the sign-in in the system browser.
     SigningIn,
     Known(CodexStatus),
@@ -83,6 +87,9 @@ pub enum Input {
     CodexChecked(CodexStatus),
     /// Retry after Codex was missing or failed.
     CheckCodex,
+    /// Install Codex, or Retry after a failed install.
+    InstallCodex,
+    CodexInstalled(Result<(), String>),
     SignIn,
     SignInDone(Result<(), String>),
     PickBrowser(BrowserKind),
@@ -104,6 +111,7 @@ pub enum Input {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     CheckCodex,
+    InstallCodex,
     SignIn,
     /// Rereads the installed browsers and the settings.
     CheckBrowsers,
@@ -149,6 +157,17 @@ impl Flow {
 
     pub fn welcome_done(&self) -> bool {
         self.signed_in() && self.browser.done()
+    }
+
+    /// Codex is missing, or its install failed, and nothing else is in flight.
+    pub fn can_install(&self) -> bool {
+        self.screen == Screen::Welcome
+            && matches!(&self.codex, Codex::Known(CodexStatus::Missing) | Codex::InstallFailed(_))
+    }
+
+    /// A `codex` command is running, so a status check would race it.
+    fn codex_busy(&self) -> bool {
+        matches!(self.codex, Codex::SigningIn | Codex::Installing)
     }
 
     pub fn can_sign_in(&self) -> bool {
@@ -209,10 +228,32 @@ fn startable(sighting: &Sighting, preset: Option<RunMode>) -> Option<RunMode> {
 pub fn step(flow: &mut Flow, input: Input) -> Effects<Effect> {
     let welcome = flow.screen == Screen::Welcome;
     match input {
-        Input::CodexChecked(status) => flow.codex = Codex::Known(status),
-        Input::CheckCodex if welcome && flow.codex != Codex::SigningIn => {
+        Input::CodexChecked(status) => {
+            if flow.codex != Codex::Installing {
+                flow.codex = Codex::Known(status);
+            }
+        }
+        Input::CheckCodex if welcome && !flow.codex_busy() => {
             flow.codex = Codex::Checking;
             return Effects::one(Effect::CheckCodex);
+        }
+        Input::InstallCodex if flow.can_install() => {
+            flow.codex = Codex::Installing;
+            return Effects::one(Effect::InstallCodex);
+        }
+        Input::CodexInstalled(result) => {
+            if flow.codex == Codex::Installing {
+                return match result {
+                    Ok(()) => {
+                        flow.codex = Codex::Checking;
+                        Effects::one(Effect::CheckCodex)
+                    }
+                    Err(e) => {
+                        flow.codex = Codex::InstallFailed(e);
+                        Effects::none()
+                    }
+                };
+            }
         }
         Input::SignIn if flow.can_sign_in() => {
             flow.codex = Codex::SigningIn;
@@ -301,6 +342,7 @@ pub fn step(flow: &mut Flow, input: Input) -> Effects<Effect> {
         }
         Input::RunAgain if matches!(flow.screen, Screen::Finished(_)) => return flow.home(),
         Input::CheckCodex
+        | Input::InstallCodex
         | Input::SignIn
         | Input::PickBrowser(_)
         | Input::ChooseFile
@@ -427,6 +469,42 @@ mod tests {
         assert_eq!(effects(&mut f, Input::SignIn), vec![]);
         assert_eq!(effects(&mut f, Input::CheckCodex), vec![Effect::CheckCodex]);
         assert_eq!(f.codex, Codex::Checking);
+    }
+
+    #[test]
+    fn install_codex_downloads_then_checks_again_and_offers_the_sign_in() {
+        let step = BrowserStep::new(found(&[BrowserKind::Brave]), brave(), None);
+        let mut f = Flow::new(CodexStatus::Missing, step, None);
+        assert!(f.can_install());
+        assert_eq!(effects(&mut f, Input::InstallCodex), vec![Effect::InstallCodex]);
+        assert_eq!(f.codex, Codex::Installing);
+        assert_eq!(effects(&mut f, Input::InstallCodex), vec![], "one install at a time");
+        assert_eq!(effects(&mut f, Input::CheckCodex), vec![], "no recheck while it downloads");
+        effects(&mut f, Input::CodexChecked(CodexStatus::Missing));
+        assert_eq!(f.codex, Codex::Installing, "a late status check does not end the install");
+        assert_eq!(effects(&mut f, Input::CodexInstalled(Ok(()))), vec![Effect::CheckCodex]);
+        assert_eq!(f.codex, Codex::Checking);
+        effects(&mut f, Input::CodexChecked(CodexStatus::SignedOut));
+        assert!(f.can_sign_in() && !f.can_install());
+    }
+
+    #[test]
+    fn a_failed_install_shows_why_and_retry_installs_again() {
+        let step = BrowserStep::new(found(&[BrowserKind::Brave]), brave(), None);
+        let mut f = Flow::new(CodexStatus::Missing, step, None);
+        effects(&mut f, Input::InstallCodex);
+        assert_eq!(effects(&mut f, Input::CodexInstalled(Err("Download failed: HTTP 404".into()))), vec![]);
+        assert_eq!(f.codex, Codex::InstallFailed("Download failed: HTTP 404".into()));
+        assert!(!f.can_sign_in());
+        assert_eq!(effects(&mut f, Input::InstallCodex), vec![Effect::InstallCodex], "Retry");
+        assert_eq!(f.codex, Codex::Installing);
+        effects(&mut f, Input::CodexInstalled(Err("again".into())));
+        assert_eq!(effects(&mut f, Input::CheckCodex), vec![Effect::CheckCodex], "Check again after a manual install");
+        assert_eq!(effects(&mut f, Input::CodexInstalled(Ok(()))), vec![], "a result nobody waits for");
+        assert_eq!(f.codex, Codex::Checking);
+        let mut signed = Flow::new(signed_in(), BrowserStep::new(found(&[BrowserKind::Brave]), brave(), None), None);
+        signed.screen = Screen::Welcome;
+        assert_eq!(effects(&mut signed, Input::InstallCodex), vec![], "nothing to install");
     }
 
     #[test]
