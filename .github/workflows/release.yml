@@ -2,8 +2,6 @@ name: release
 
 on:
   push:
-    tags: ["v*"]
-    # A tag run can only restore caches saved on its own ref or on main, so main builds keep them warm.
     branches: [main]
   workflow_dispatch:
 
@@ -63,16 +61,33 @@ jobs:
           path: bilinkers-macos-universal.dmg
 
   release:
-    if: startsWith(github.ref, 'refs/tags/')
+    if: github.ref == 'refs/heads/main'
     needs: [windows, dmg]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - name: Find an unreleased Cargo.toml version
+        id: version
+        run: |
+          tag="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "new=false" >> "$GITHUB_OUTPUT"
+            echo "$tag is already released"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - if: steps.version.outputs.new == 'true'
+        uses: actions/download-artifact@v4
         with:
           name: windows
-      - uses: actions/download-artifact@v4
+      - if: steps.version.outputs.new == 'true'
+        uses: actions/download-artifact@v4
         with:
           name: dmg
-      - run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes bilinkers-windows-x64.exe bilinkers-macos-universal.dmg
+      - if: steps.version.outputs.new == 'true'
+        run: gh release create "${{ steps.version.outputs.tag }}" --target "$GITHUB_SHA" --generate-notes bilinkers-windows-x64.exe bilinkers-macos-universal.dmg
         env:
           GH_TOKEN: ${{ github.token }}
