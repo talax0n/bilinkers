@@ -1,7 +1,7 @@
 //! The colours, type and controls every screen shares.
 
 use rune::tok::{self, type_, Family, TextStyle};
-use rune::{col, el, oklch, text, Color, Cursor, El};
+use rune::{col, el, oklch, row, text, Color, Cursor, El};
 
 /// The colours the theme tokens don't have, tuned per appearance for contrast on `bg` and `card`.
 pub struct Tones {
@@ -44,6 +44,13 @@ pub const STEP_TITLE: TextStyle = TextStyle::new(14.0, 600.0);
 pub const SMALL: TextStyle = TextStyle::new(11.5, 400.0).lh(15.0);
 const BUTTON: TextStyle = TextStyle::new(13.0, 500.0);
 const BIG_BUTTON: TextStyle = TextStyle::new(16.0, 600.0);
+
+pub const CREDIT: &str = "Made by TX25-2";
+
+/// The quiet credit line at the bottom of the welcome and home screens.
+pub fn credit(t: &tok::Theme) -> El {
+    row().key("credit").w_full().center().child(text(CREDIT).key("credit-text").font(SMALL).color(t.text_secondary))
+}
 
 /// A bordered card, the surface every block sits on.
 pub fn card(key: &str, t: &tok::Theme) -> El {

@@ -5,7 +5,7 @@ use rune::{col, el, row, text, Color, Cursor, El, ScrollSpec};
 
 use crate::setup::{BrowserPick, CodexStatus, Origin};
 use crate::ui::flow::{Codex, Flow, Input};
-use crate::ui::style::{badge, button, card, dot, Kind, Tones, HEADING, SMALL, STEP_TITLE, SUBHEADING, TITLE};
+use crate::ui::style::{badge, button, card, credit, dot, Kind, Tones, HEADING, SMALL, STEP_TITLE, SUBHEADING, TITLE};
 use crate::ui::{send, Ui};
 
 pub const CODEX_INSTALL: &str =
@@ -259,4 +259,5 @@ pub fn view(flow: &Flow, t: &tok::Theme, tones: &Tones) -> El {
         .gap(16.0)
         .child(header)
         .child(col().w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(steps))
+        .child(credit(t))
 }

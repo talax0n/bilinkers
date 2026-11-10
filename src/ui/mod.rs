@@ -574,6 +574,7 @@ mod tests {
             assert_eq!(path, Some(found.path.display().to_string()));
         }
         assert!(rt.find("browser-chromium").is_none(), "only what the search found");
+        assert_eq!(shown(&rt, "credit-text").as_deref(), Some(style::CREDIT));
     }
 
     #[test]
@@ -613,6 +614,7 @@ mod tests {
         assert_eq!(shown(&rt, "browser-line-text").as_deref(), Some("Browser: Brave"));
         assert_eq!(shown(&rt, "connection-line-text").as_deref(), Some("Browser is closed. Start opens it."));
         assert!(rt.find("mode-course").is_none(), "no mode picker");
+        assert_eq!(shown(&rt, "credit-text").as_deref(), Some(style::CREDIT));
         click(&mut rt, "setup");
         assert_eq!(rt.state.flow.screen, Screen::Welcome);
     }

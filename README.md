@@ -112,3 +112,7 @@ To build without the desktop window, turn off the default `ui` feature:
 ```bash
 cargo build --no-default-features
 ```
+
+## Credits
+
+Bilinkers is made by TX25-2.

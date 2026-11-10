@@ -7,7 +7,7 @@ use crate::detect::PageKind;
 use crate::session::{Connection, Sighting};
 use crate::setup::CodexStatus;
 use crate::ui::flow::{Codex, Flow, Input, Waiting};
-use crate::ui::style::{big_button, button, card, dot, Kind, Tones, HEADING, SUBHEADING, TITLE};
+use crate::ui::style::{big_button, button, card, credit, dot, Kind, Tones, HEADING, SUBHEADING, TITLE};
 use crate::ui::welcome::signed_in_text;
 use crate::ui::{send, Ui};
 
@@ -96,11 +96,14 @@ pub fn home(flow: &Flow, t: &tok::Theme, tones: &Tones) -> El {
                 .child(line("browser-line", browser_color, browser_text, t))
                 .child(line("connection-line", connection_color, connection_text, t)),
         );
-    col().key("home").w_full().h_full().gap(12.0).child(header("Home", Some(setup), t)).child(panel(
-        "home-card",
-        content,
-        t,
-    ))
+    col()
+        .key("home")
+        .w_full()
+        .h_full()
+        .gap(12.0)
+        .child(header("Home", Some(setup), t))
+        .child(panel("home-card", content, t))
+        .child(credit(t))
 }
 
 /// The waiting screen's status: its colour, its text, and a hint or detail below it.

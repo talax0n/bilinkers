@@ -12,9 +12,13 @@ use bilinkers::runners::unit::UnitPage;
 use bilinkers::session::{ensure_browser, run_and_report, wait_for_port, Launch, RunMode, DETECT_FAILED};
 use bilinkers::setup::{settings_path, EnvLayers};
 
+const VERSION: &str = concat!("bilinkers ", env!("CARGO_PKG_VERSION"), ", made by ", env!("CARGO_PKG_AUTHORS"));
+
 const USAGE: &str = "usage: bilinkers [--no-ui] [course|unit|exercise|iframe|reading|checkpoint|final-test] [url]
        bilinkers attach | open-row \"<row title>\" | eval-frame \"<script>\" | ui-demo <rune flags>
-Env: CDP_PORT (default 9222), BROWSER (chrome|brave|edge), BROWSER_BINARY_PATH, LLM_PROVIDER=codex
+       bilinkers --version
+Bilinkers is made by TX25-2.
+Env: CDP_PORT (default 9222), BROWSER (chrome|brave|edge|chromium), BROWSER_BINARY_PATH, LLM_PROVIDER=codex
 Settings are read from the environment, then ./.env, then the window's settings.env.
 On a terminal with a display a run opens a window that signs in, picks the browser and starts
 on the page you open; --no-ui or NO_TUI=1 keeps the terminal prompts and prints JSON lines.
@@ -40,6 +44,8 @@ enum Mode {
     EvalFrame {
         script: String,
     },
+    /// Prints the version and the credit.
+    Version,
     /// Dev: render the dashboard headless from a fixed run, passing the rest to Rune.
     UiDemo {
         rune_args: Vec<String>,
@@ -55,6 +61,7 @@ fn parse_args(args: &[String]) -> Result<Mode, String> {
         Some("eval-frame") => second.map(|script| Mode::EvalFrame { script }).ok_or_else(|| USAGE.to_string()),
         Some("ui-demo") => Ok(Mode::UiDemo { rune_args: args[1..].to_vec() }),
         Some("-h" | "--help" | "help") => Err(USAGE.to_string()),
+        Some("-V" | "--version") => Ok(Mode::Version),
         Some(arg) => match RunMode::parse(arg) {
             Some(mode) => Ok(Mode::Run { mode: Some(mode), url: second.unwrap_or_else(|| DEFAULT_URL.to_string()) }),
             // Like cli.js, an unknown first argument is the start URL.
@@ -156,7 +163,7 @@ async fn prepare(mode: Mode, env: &HashMap<String, String>, port: u16) -> Option
             }
             return None;
         }
-        Mode::UiDemo { .. } => return None,
+        Mode::UiDemo { .. } | Mode::Version => return None,
         Mode::Run { mode: Some(run), .. } => run,
         Mode::Run { mode: None, .. } => {
             println!("Detecting exercise type...");
@@ -350,6 +357,10 @@ fn main() {
         eprintln!("{e}");
         std::process::exit(2);
     });
+    if mode == Mode::Version {
+        println!("{VERSION}");
+        return;
+    }
     #[cfg(feature = "ui")]
     if let Mode::UiDemo { rune_args } = mode {
         bilinkers::ui::render_headless(rune_args);
@@ -409,6 +420,9 @@ mod tests {
             parse_args(&args(&["ui-demo", "--snap", "a.png"])),
             Ok(Mode::UiDemo { rune_args: args(&["--snap", "a.png"]) })
         );
+        assert_eq!(parse_args(&args(&["--version"])), Ok(Mode::Version));
+        assert_eq!(VERSION, format!("bilinkers {}, made by TX25-2", env!("CARGO_PKG_VERSION")));
+        assert!(USAGE.contains("Bilinkers is made by TX25-2."));
         assert_eq!(
             parse_args(&args(&["final-test"])),
             Ok(Mode::Run { mode: Some(RunMode::FinalTest), url: DEFAULT_URL.to_string() })
