@@ -17,9 +17,10 @@ use beelingua::runners::unit::{self, UnitPage};
 use beelingua::runners::{checkpoint, exercise, final_test_runner, iframe, reading, Live, Report};
 use serde_json::{json, Value};
 
-const USAGE: &str = "usage: beelingua [course|unit|exercise|iframe|reading|checkpoint|final-test] [url]
-       beelingua attach | open-row \"<row title>\" | eval-frame \"<script>\"
+const USAGE: &str = "usage: beelingua [--no-ui] [course|unit|exercise|iframe|reading|checkpoint|final-test] [url]
+       beelingua attach | open-row \"<row title>\" | eval-frame \"<script>\" | ui-demo <rune flags>
 Env: CDP_PORT (default 9222), BROWSER (chrome|brave|edge), BROWSER_BINARY_PATH, LLM_PROVIDER=codex
+A run opens a dashboard window on a terminal with a display; --no-ui or NO_TUI=1 prints JSON lines.
 final-test is read-only unless FINAL_TEST_AUTO_ANSWER=1 or FINAL_TEST_GUESS_LISTENING=1
 (FINAL_TEST_CONFIDENCE_THRESHOLD, FINAL_TEST_REVIEWS_REQUIRED). It never clicks Submit.";
 
@@ -37,16 +38,29 @@ enum RunMode {
 }
 
 impl RunMode {
+    const ALL: [RunMode; 7] = [
+        RunMode::Course,
+        RunMode::Unit,
+        RunMode::Exercise,
+        RunMode::Iframe,
+        RunMode::Reading,
+        RunMode::Checkpoint,
+        RunMode::FinalTest,
+    ];
+
     fn parse(arg: &str) -> Option<RunMode> {
-        match arg {
-            "course" => Some(RunMode::Course),
-            "unit" => Some(RunMode::Unit),
-            "exercise" => Some(RunMode::Exercise),
-            "iframe" => Some(RunMode::Iframe),
-            "reading" => Some(RunMode::Reading),
-            "checkpoint" => Some(RunMode::Checkpoint),
-            "final-test" => Some(RunMode::FinalTest),
-            _ => None,
+        RunMode::ALL.into_iter().find(|mode| mode.name() == arg)
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            RunMode::Course => "course",
+            RunMode::Unit => "unit",
+            RunMode::Exercise => "exercise",
+            RunMode::Iframe => "iframe",
+            RunMode::Reading => "reading",
+            RunMode::Checkpoint => "checkpoint",
+            RunMode::FinalTest => "final-test",
         }
     }
 
@@ -78,6 +92,10 @@ enum Mode {
     EvalFrame {
         script: String,
     },
+    /// Dev: render the dashboard headless from a fixed run, passing the rest to Rune.
+    UiDemo {
+        rune_args: Vec<String>,
+    },
 }
 
 fn parse_args(args: &[String]) -> Result<Mode, String> {
@@ -87,6 +105,7 @@ fn parse_args(args: &[String]) -> Result<Mode, String> {
         Some("attach") => Ok(Mode::Attach),
         Some("open-row") => second.map(|title| Mode::OpenRow { title }).ok_or_else(|| USAGE.to_string()),
         Some("eval-frame") => second.map(|script| Mode::EvalFrame { script }).ok_or_else(|| USAGE.to_string()),
+        Some("ui-demo") => Ok(Mode::UiDemo { rune_args: args[1..].to_vec() }),
         Some("-h" | "--help" | "help") => Err(USAGE.to_string()),
         Some(arg) => match RunMode::parse(arg) {
             Some(mode) => Ok(Mode::Run { mode: Some(mode), url: second.unwrap_or_else(|| DEFAULT_URL.to_string()) }),
@@ -226,19 +245,32 @@ fn fail(message: &str) -> ! {
     std::process::exit(1);
 }
 
-#[tokio::main]
-async fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let mode = parse_args(&args).unwrap_or_else(|e| {
-        eprintln!("{e}");
-        std::process::exit(2);
-    });
-    let env = environment(std::fs::read_to_string(".env").ok().as_deref());
-    let config = build_config(&env);
-    let port = env.get("CDP_PORT").and_then(|p| p.parse().ok()).unwrap_or(9222);
+/// Removes every `flag` from `args`; true when there was one.
+fn take_flag(args: &mut Vec<String>, flag: &str) -> bool {
+    let before = args.len();
+    args.retain(|a| a != flag);
+    args.len() != before
+}
 
+/// Like cli.js: the dashboard needs a terminal on stdout and no NO_TUI. The window also needs a display.
+fn wants_ui(no_ui: bool, env: &HashMap<String, String>, stdout_is_terminal: bool, display: bool) -> bool {
+    !no_ui && env.get("NO_TUI").is_none_or(|v| v.is_empty()) && stdout_is_terminal && display
+}
+
+#[cfg(feature = "ui")]
+fn display_available() -> bool {
+    beelingua::ui::display_available()
+}
+
+#[cfg(not(feature = "ui"))]
+fn display_available() -> bool {
+    false
+}
+
+/// Attaches and resolves the run mode; dev modes finish here and return None.
+async fn prepare(mode: Mode, env: &HashMap<String, String>, port: u16) -> Option<(Lms, RunMode)> {
     if let Mode::Run { url, .. } = &mode {
-        let launched = ensure_browser(&env, port, url).unwrap_or_else(|e| fail(&e));
+        let launched = ensure_browser(env, port, url).unwrap_or_else(|e| fail(&e));
         if std::io::stdin().is_terminal() {
             wait_for_enter("Log in and open the exercise, then press Enter to start the bot... ");
         } else if launched && !wait_for_port(port, Duration::from_secs(30)) {
@@ -252,21 +284,22 @@ async fn main() {
     let run = match mode {
         Mode::Attach => {
             println!("attached to {url}");
-            return;
+            return None;
         }
         Mode::OpenRow { title } => {
             if let Err(e) = open_row(&lms, &title).await {
                 fail(&e);
             }
-            return;
+            return None;
         }
         Mode::EvalFrame { script } => {
             match lms.execute_in_frame(&script, &[]).await {
                 Ok(value) => println!("{value}"),
                 Err(e) => fail(&e.to_string()),
             }
-            return;
+            return None;
         }
+        Mode::UiDemo { .. } => return None,
         Mode::Run { mode: Some(run), .. } => run,
         Mode::Run { mode: None, .. } => {
             println!("Detecting exercise type...");
@@ -278,14 +311,74 @@ async fn main() {
             RunMode::from_detected(detected)
         }
     };
+    Some((lms, run))
+}
 
-    match run_mode(run, &lms, &config, &env).await {
-        Ok(fields) => logger::info("Run finished", fields),
-        Err(e) => {
-            logger::error("Run failed", [("error", json!(e))]);
-            std::process::exit(1);
-        }
+/// Exit code 130, as for Ctrl-C, when the window closes before the run ends.
+const STOPPED: i32 = 130;
+
+fn main() {
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let no_ui = take_flag(&mut args, "--no-ui");
+    let mode = parse_args(&args).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(2);
+    });
+    #[cfg(feature = "ui")]
+    if let Mode::UiDemo { rune_args } = mode {
+        beelingua::ui::render_headless("course", &beelingua::ui::demo_events(), rune_args);
+        return;
     }
+    #[cfg(not(feature = "ui"))]
+    if let Mode::UiDemo { .. } = mode {
+        fail("ui-demo needs the ui feature");
+    }
+    let env = environment(std::fs::read_to_string(".env").ok().as_deref());
+    let config = build_config(&env);
+    let port = env.get("CDP_PORT").and_then(|p| p.parse().ok()).unwrap_or(9222);
+
+    let runtime = tokio::runtime::Runtime::new().unwrap_or_else(|e| fail(&format!("Could not start tokio: {e}")));
+    let Some((lms, run)) = runtime.block_on(prepare(mode, &env, port)) else {
+        return;
+    };
+    let ui = wants_ui(no_ui, &env, std::io::stdout().is_terminal(), display_available());
+
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    // The window owns the main thread (macOS requires it), so the bot runs its runtime beside it.
+    let bot = std::thread::spawn(move || {
+        runtime.block_on(async move {
+            let finish = async {
+                match run_mode(run, &lms, &config, &env).await {
+                    Ok(fields) => {
+                        logger::info("Run finished", fields);
+                        0
+                    }
+                    Err(e) => {
+                        logger::error("Run failed", [("error", json!(e))]);
+                        1
+                    }
+                }
+            };
+            tokio::select! {
+                code = finish => code,
+                Ok(()) = stopped => STOPPED,
+            }
+        })
+    });
+
+    #[cfg(feature = "ui")]
+    if ui {
+        if let Err(e) = beelingua::ui::run(run.name()) {
+            eprintln!("No dashboard window ({e}); printing JSON lines instead.");
+        } else if !bot.is_finished() {
+            eprintln!("Dashboard closed; stopping the run.");
+        }
+        let _ = stop.send(());
+    }
+    #[cfg(not(feature = "ui"))]
+    let _ = (ui, &stop);
+    let code = bot.join().unwrap_or(1);
+    std::process::exit(code);
 }
 
 #[cfg(test)]
@@ -312,8 +405,35 @@ mod tests {
         );
         assert_eq!(RunMode::from_detected(PageMode::Checkpoint), RunMode::Checkpoint);
         assert_eq!(
+            parse_args(&args(&["ui-demo", "--snap", "a.png"])),
+            Ok(Mode::UiDemo { rune_args: args(&["--snap", "a.png"]) })
+        );
+        assert_eq!(
             parse_args(&args(&["final-test"])),
             Ok(Mode::Run { mode: Some(RunMode::FinalTest), url: DEFAULT_URL.to_string() })
         );
+    }
+
+    #[test]
+    fn run_mode_names_parse_back_to_the_same_mode() {
+        for name in ["course", "unit", "exercise", "iframe", "reading", "checkpoint", "final-test"] {
+            assert_eq!(RunMode::parse(name).map(RunMode::name), Some(name));
+        }
+    }
+
+    #[test]
+    fn the_ui_opens_only_on_a_terminal_with_a_display_and_without_an_opt_out() {
+        let mut args = args(&["--no-ui", "course", "--no-ui"]);
+        assert!(take_flag(&mut args, "--no-ui"));
+        assert_eq!(args, vec!["course".to_string()]);
+
+        let env = |pairs: &[(&str, &str)]| pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let none = env(&[]);
+        assert!(wants_ui(false, &none, true, true));
+        assert!(!wants_ui(true, &none, true, true), "--no-ui");
+        assert!(!wants_ui(false, &env(&[("NO_TUI", "1")]), true, true), "NO_TUI=1");
+        assert!(wants_ui(false, &env(&[("NO_TUI", "")]), true, true), "an empty NO_TUI is unset, as in JS");
+        assert!(!wants_ui(false, &none, false, true), "piped stdout keeps JSON lines");
+        assert!(!wants_ui(false, &none, true, false), "no display");
     }
 }
