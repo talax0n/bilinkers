@@ -15,10 +15,11 @@ use tokio::sync::oneshot;
 
 use crate::browser::{attach_to_lms, Driver, Lms, LMS_HOST};
 use crate::config::Config;
-use crate::detect::{detect_mode, PageMode};
+use crate::detect::{classify_page, detect_mode, PageKind, PageMode};
 use crate::logger;
 use crate::runners::course::{self, CourseOptions};
 use crate::runners::{checkpoint, exercise, final_test_runner, iframe, reading, unit, Live, Report};
+use crate::setup::BrowserKind;
 
 /// Exit code 130, as for Ctrl-C, when a run is stopped before it ends.
 pub const STOPPED: i32 = 130;
@@ -68,7 +69,7 @@ impl RunMode {
             RunMode::Course => "Course",
             RunMode::Unit => "Unit",
             RunMode::Exercise => "Exercise",
-            RunMode::Iframe => "Iframe",
+            RunMode::Iframe => "Activity",
             RunMode::Reading => "Reading",
             RunMode::Checkpoint => "Checkpoint",
             RunMode::FinalTest => "Final test",
@@ -101,6 +102,15 @@ impl BrowserSetup {
         let name = env.get("BROWSER").filter(|b| !b.is_empty()).map_or("chrome".to_string(), |b| b.to_lowercase());
         BrowserSetup { name, binary: resolve_binary_path(env) }
     }
+
+    /// The name a person reads: "Brave", or a picked program's file name.
+    pub fn display_name(&self) -> String {
+        if let Some(kind) = BrowserKind::parse(&self.name) {
+            return kind.label().to_string();
+        }
+        let file = self.binary.as_ref().ok().and_then(|b| Path::new(b).file_stem()).map(|f| f.to_string_lossy());
+        file.map_or_else(|| self.name.clone(), |f| f.into_owned())
+    }
 }
 
 /// cli.js resolveBinaryPath: BROWSER_BINARY_PATH (or CHROME_BINARY_PATH), else the platform default.
@@ -115,18 +125,11 @@ pub fn resolve_binary_path(env: &HashMap<String, String>) -> Result<String, Stri
         return Ok(path.clone());
     }
     let browser = env.get("BROWSER").filter(|b| !b.is_empty()).map_or("chrome".to_string(), |b| b.to_lowercase());
-    let default = match (std::env::consts::OS, browser.as_str()) {
-        ("macos", "chrome") => "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        ("macos", "brave") => "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-        ("macos", "edge") => "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-        ("windows", "chrome") => r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        ("windows", "brave") => r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
-        ("windows", "edge") => r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-        (os, _) => {
-            return Err(format!(
-                "No default binary path known for BROWSER={browser} on {os}. Set BROWSER_BINARY_PATH in .env."
-            ))
-        }
+    let os = std::env::consts::OS;
+    let Some(default) = BrowserKind::parse(&browser).and_then(|kind| kind.default_path(os)) else {
+        return Err(format!(
+            "No default binary path known for BROWSER={browser} on {os}. Set BROWSER_BINARY_PATH in .env."
+        ));
     };
     if !Path::new(default).exists() {
         return Err(format!(
@@ -259,6 +262,63 @@ impl Connection {
     }
 }
 
+/// One look at the browser while the window waits to start: the tab list, then what the LMS
+/// tab shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Sighting {
+    NotRunning,
+    NoLmsTab,
+    Lms {
+        title: String,
+        url: String,
+        /// None when it was not looked at, or could not be read yet (the page is loading).
+        page: Option<PageKind>,
+    },
+}
+
+/// Watches the LMS tab over one CDP session, reattaching only when that session stops
+/// answering. Every look is read-only.
+#[derive(Default)]
+pub struct Watcher {
+    lms: Option<Lms>,
+}
+
+const LOOK_TIMEOUT: Duration = Duration::from_secs(5);
+
+impl Watcher {
+    /// Lists the tabs (blocking, so run it off the runtime's workers) and, when `classify` and
+    /// an LMS tab is open, reads what it shows. A page that can start a run drops the session,
+    /// since the run attaches its own.
+    pub async fn look(&mut self, port: u16, classify: bool) -> Sighting {
+        let (title, url) = match Connection::probe(port) {
+            Connection::Lms { title, url } => (title, url),
+            other => {
+                self.lms = None;
+                return if other == Connection::NoLmsTab { Sighting::NoLmsTab } else { Sighting::NotRunning };
+            }
+        };
+        if !classify {
+            return Sighting::Lms { title, url, page: None };
+        }
+        let page = tokio::time::timeout(LOOK_TIMEOUT, self.classify(port)).await.ok().flatten();
+        if page.is_none() || matches!(page, Some(PageKind::Mode(_))) {
+            self.lms = None;
+        }
+        Sighting::Lms { title, url, page }
+    }
+
+    async fn classify(&mut self, port: u16) -> Option<PageKind> {
+        let alive = match &self.lms {
+            Some(lms) => lms.current_url().await.is_ok_and(|url| url.contains(LMS_HOST)),
+            None => false,
+        };
+        if !alive {
+            self.lms = Some(attach_to_lms(port).await.ok()?);
+        }
+        classify_page(self.lms.as_ref()?).await.ok()
+    }
+}
+
 pub async fn run_mode(
     mode: RunMode,
     lms: &Lms,
@@ -383,6 +443,7 @@ mod tests {
         }
         assert_eq!(RunMode::from_detected(PageMode::Checkpoint), RunMode::Checkpoint);
         assert_eq!(RunMode::FinalTest.label(), "Final test");
+        assert_eq!(RunMode::Iframe.label(), "Activity", "no jargon in the window");
     }
 
     #[test]
@@ -423,5 +484,9 @@ mod tests {
         assert!(setup.binary.unwrap_err().contains("/nonexistent/browser"));
         let brave: HashMap<String, String> = [("BROWSER".to_string(), "Brave".to_string())].into_iter().collect();
         assert_eq!(BrowserSetup::from_env(&brave).name, "brave");
+        assert_eq!(BrowserSetup::from_env(&brave).display_name(), "Brave");
+        let custom =
+            BrowserSetup { name: "custom".into(), binary: Ok("/opt/Chromium.app/Contents/MacOS/Chromium".into()) };
+        assert_eq!(custom.display_name(), "Chromium");
     }
 }

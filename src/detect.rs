@@ -30,6 +30,17 @@ impl PageMode {
     }
 }
 
+/// What the window sees on the LMS tab: a page a run can start on, or why it keeps waiting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageKind {
+    Mode(PageMode),
+    /// Final tests run only from the terminal (`beelingua final-test`).
+    FinalTest,
+    /// The Beelingua home with the course islands, before a course is opened.
+    IslandMap,
+    Other,
+}
+
 const DOCUMENT_HTML: &str = "return document.documentElement ? document.documentElement.outerHTML : null;";
 
 // A checkpoint gate looks like an exercise gate. Only the word "Checkpoint" differs.
@@ -54,6 +65,22 @@ const UNIT_LIST: &str = r#"
     let titled = 0;
     rows.forEach((b) => { if (b.querySelector('.bl-text-ellipsis')) titled += 1; });
     return titled >= 2;
+  "#;
+
+// The roadmap's own "FT 0/1" counter and node labels never spell out "Final Test", but its
+// labels are checked anyway so a roadmap is never mistaken for a test.
+const FINAL_TEST: &str = r#"
+    const roadmap = [...document.querySelectorAll('.hoverable-pointer')].some((el) =>
+      /^(Unit|Checkpoint)\d+$/i.test(el.textContent.replace(/\s+/g, '').trim())
+    );
+    if (roadmap) return false;
+    return /final[\s_-]*test/i.test(location.href) || /Final\s*Test/i.test(document.body.innerText);
+  "#;
+
+const ISLAND_MAP: &str = r#"
+    return [...document.querySelectorAll('.hoverable-pointer')].some((el) =>
+      /^[BC]\d\.\d$/.test(el.textContent.replace(/\s+/g, '').trim())
+    );
   "#;
 
 const OPTION_MARKER: &str = "bl-w-full justify-content-start";
@@ -101,6 +128,21 @@ pub async fn detect_mode<P: FramedPage>(page: &P) -> PageResult<Option<PageMode>
     Ok(None)
 }
 
+/// detect_mode for the window: a Final Test is refused before anything else, since its pages
+/// look like a checkpoint or an exercise, and the island map gets its own hint. Read-only.
+pub async fn classify_page<P: FramedPage>(page: &P) -> PageResult<PageKind> {
+    if page.execute_script(FINAL_TEST, &[]).await? == json!(true) {
+        return Ok(PageKind::FinalTest);
+    }
+    if let Some(mode) = detect_mode(page).await? {
+        return Ok(PageKind::Mode(mode));
+    }
+    if page.execute_script(ISLAND_MAP, &[]).await? == json!(true) {
+        return Ok(PageKind::IslandMap);
+    }
+    Ok(PageKind::Other)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,7 +151,15 @@ mod tests {
 
     /// A page described by its frame HTML (None without an iframe) and which top-level probes match.
     async fn detect(frame: Option<&str>, top: &str, matches: &[&str]) -> Option<PageMode> {
-        let page = FakePage::new(|scope: Scope, code: &str, _: &[Value]| {
+        detect_mode(&page(frame, top, matches)).await.unwrap()
+    }
+
+    fn page<'a>(
+        frame: Option<&'a str>,
+        top: &'a str,
+        matches: &'a [&'a str],
+    ) -> FakePage<impl FnMut(Scope, &str, &[Value]) -> PageResult<Value> + 'a> {
+        FakePage::new(move |scope: Scope, code: &str, _: &[Value]| {
             Ok(match (scope, code) {
                 (Scope::Top, IFRAME_COUNT) => json!(u8::from(frame.is_some())),
                 (Scope::Frame, DOCUMENT_HTML) => json!(frame),
@@ -121,8 +171,24 @@ mod tests {
                 (Scope::Top, code) => json!(matches.iter().any(|m| code.contains(m))),
                 other => panic!("unexpected script {other:?}"),
             })
-        });
-        detect_mode(&page).await.unwrap()
+        })
+    }
+
+    async fn classify(top: &str, matches: &[&str]) -> PageKind {
+        classify_page(&page(None, top, matches)).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_window_refuses_a_final_test_and_names_the_island_map() {
+        assert_eq!(
+            classify("", &["Final\\s*Test", "Start Attempt"]).await,
+            PageKind::FinalTest,
+            "before the checkpoint gate"
+        );
+        assert_eq!(classify("", &["Start Attempt"]).await, PageKind::Mode(PageMode::Checkpoint));
+        assert_eq!(classify("", &["[BC]"]).await, PageKind::IslandMap);
+        assert_eq!(classify("<html></html>", &["bl-text-ellipsis"]).await, PageKind::Mode(PageMode::Unit));
+        assert_eq!(classify("<html></html>", &[]).await, PageKind::Other);
     }
 
     #[tokio::test]
