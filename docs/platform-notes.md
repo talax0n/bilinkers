@@ -223,6 +223,12 @@ Result:
 
 - Confirming Submit lands on `.../result/version/{id}` directly (no `/review` needed). The text reads like "...Sorry, Try Again.Your Score:83Correct25Incorrect5No Answer0...". The number follows "Your Score:" with no separator (a run that missed 5 of 30 read "Your Score:83"). The runner matches `Your Score:(\d+)` for up to 10 s. (waitForScore)
 
+Passed checkpoint gate (verified live 2026-11-10, C2.2 Checkpoint 1):
+
+- The node opens `.../session/{id}/content/{id}/BlCheckpoint?status=2`.
+- The gate shows the title, Total Question 30, Passing Score 100, Maximum Attempt Unlimited, the assessment description, and a History block (Attempted 5, Score 100, Completion Date, Duration).
+- Its only buttons are "Cancel" and "Detail". There is no "Start Attempt N" and no "Continue", so a passed checkpoint cannot be re-attempted and the runner stops with `no-gate` after the 8 s poll (seen with the Rust binary).
+
 ## Final test
 
 - A Final Test attempt has 50 questions and exactly 1 attempt, with a passing score of 66. It uses the same pill-nav native quiz DOM as a checkpoint. Option rows are `button.bl-w-full.justify-content-start`. (src/runners/final-test.js)
