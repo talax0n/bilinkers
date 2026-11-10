@@ -2,20 +2,14 @@
 //! unless one already answers, then attaches and runs the mode, auto-detected when omitted.
 
 use std::collections::HashMap;
-use std::io::{BufRead, IsTerminal, Read, Write};
-use std::net::{SocketAddr, TcpStream};
-use std::path::Path;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::io::{BufRead, IsTerminal, Write};
+use std::time::Duration;
 
 use beelingua::browser::{attach_to_lms, Driver, FramedPage, Lms};
-use beelingua::config::{build_config, environment, Config};
-use beelingua::detect::{detect_mode, PageMode};
-use beelingua::logger;
-use beelingua::runners::course::{self, CourseOptions};
-use beelingua::runners::unit::{self, UnitPage};
-use beelingua::runners::{checkpoint, exercise, final_test_runner, iframe, reading, Live, Report};
-use serde_json::{json, Value};
+use beelingua::config::{build_config, environment};
+use beelingua::detect::detect_mode;
+use beelingua::runners::unit::UnitPage;
+use beelingua::session::{ensure_browser, run_and_report, wait_for_port, Launch, RunMode, DETECT_FAILED, STOPPED};
 
 const USAGE: &str = "usage: beelingua [--no-ui] [course|unit|exercise|iframe|reading|checkpoint|final-test] [url]
        beelingua attach | open-row \"<row title>\" | eval-frame \"<script>\" | ui-demo <rune flags>
@@ -25,56 +19,6 @@ final-test is read-only unless FINAL_TEST_AUTO_ANSWER=1 or FINAL_TEST_GUESS_LIST
 (FINAL_TEST_CONFIDENCE_THRESHOLD, FINAL_TEST_REVIEWS_REQUIRED). It never clicks Submit.";
 
 const DEFAULT_URL: &str = "https://lms.binus.ac.id";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RunMode {
-    Course,
-    Unit,
-    Exercise,
-    Iframe,
-    Reading,
-    Checkpoint,
-    FinalTest,
-}
-
-impl RunMode {
-    const ALL: [RunMode; 7] = [
-        RunMode::Course,
-        RunMode::Unit,
-        RunMode::Exercise,
-        RunMode::Iframe,
-        RunMode::Reading,
-        RunMode::Checkpoint,
-        RunMode::FinalTest,
-    ];
-
-    fn parse(arg: &str) -> Option<RunMode> {
-        RunMode::ALL.into_iter().find(|mode| mode.name() == arg)
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            RunMode::Course => "course",
-            RunMode::Unit => "unit",
-            RunMode::Exercise => "exercise",
-            RunMode::Iframe => "iframe",
-            RunMode::Reading => "reading",
-            RunMode::Checkpoint => "checkpoint",
-            RunMode::FinalTest => "final-test",
-        }
-    }
-
-    fn from_detected(mode: PageMode) -> RunMode {
-        match mode {
-            PageMode::Course => RunMode::Course,
-            PageMode::Unit => RunMode::Unit,
-            PageMode::Exercise => RunMode::Exercise,
-            PageMode::Iframe => RunMode::Iframe,
-            PageMode::Reading => RunMode::Reading,
-            PageMode::Checkpoint => RunMode::Checkpoint,
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Mode {
@@ -116,110 +60,19 @@ fn parse_args(args: &[String]) -> Result<Mode, String> {
     }
 }
 
-/// True when something answers `/json/version` on the debug port.
-fn cdp_answers(port: u16) -> bool {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(500)) else {
-        return false;
-    };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    // The DevTools server ignores HTTP/1.0 and keeps 1.1 connections open, so read only the first chunk.
-    let request = format!("GET /json/version HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n");
-    if stream.write_all(request.as_bytes()).is_err() {
-        return false;
-    }
-    let mut response = [0u8; 64];
-    let n = stream.read(&mut response).unwrap_or(0);
-    response[..n].starts_with(b"HTTP/1.1 200")
-}
-
-/// cli.js resolveBinaryPath: BROWSER_BINARY_PATH (or CHROME_BINARY_PATH), else the platform default.
-fn resolve_binary_path(env: &HashMap<String, String>) -> Result<String, String> {
-    let explicit = env.get("BROWSER_BINARY_PATH").or_else(|| env.get("CHROME_BINARY_PATH")).filter(|p| !p.is_empty());
-    if let Some(path) = explicit {
-        if !Path::new(path).exists() {
-            return Err(format!(
-                "BROWSER_BINARY_PATH (or CHROME_BINARY_PATH) is set to \"{path}\", but nothing exists there. Double check the path in .env."
-            ));
-        }
-        return Ok(path.clone());
-    }
-    let browser = env.get("BROWSER").filter(|b| !b.is_empty()).map_or("chrome".to_string(), |b| b.to_lowercase());
-    let default = match (std::env::consts::OS, browser.as_str()) {
-        ("macos", "chrome") => "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        ("macos", "brave") => "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-        ("macos", "edge") => "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-        ("windows", "chrome") => r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        ("windows", "brave") => r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
-        ("windows", "edge") => r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-        (os, _) => {
-            return Err(format!(
-                "No default binary path known for BROWSER={browser} on {os}. Set BROWSER_BINARY_PATH in .env."
-            ))
-        }
-    };
-    if !Path::new(default).exists() {
-        return Err(format!(
-            "BROWSER={browser} defaults to \"{default}\", but it's not installed there. Set BROWSER to a browser you have (chrome/brave/edge) or BROWSER_BINARY_PATH to its location."
-        ));
-    }
-    Ok(default.to_string())
-}
-
 /// Starts the browser with the debug port unless one already answers. True when it launched one.
-fn ensure_browser(env: &HashMap<String, String>, port: u16, url: &str) -> Result<bool, String> {
-    if cdp_answers(port) {
-        return Ok(false);
+fn launch_browser(env: &HashMap<String, String>, port: u16, url: &str) -> Result<bool, String> {
+    let launch = ensure_browser(env, port, url)?;
+    if let Launch::Launched { binary } = &launch {
+        println!("Launching browser: {binary}");
     }
-    let binary = resolve_binary_path(env)?;
-    println!("Launching browser: {binary}");
-    let mut command = Command::new(&binary);
-    command
-        .args([format!("--remote-debugging-port={port}"), url.to_string()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut command, 0);
-    command.spawn().map_err(|e| format!("Failed to launch browser at \"{binary}\": {e}"))?;
-    Ok(true)
+    Ok(launch != Launch::Reused)
 }
 
 fn wait_for_enter(prompt: &str) {
     print!("{prompt}");
     let _ = std::io::stdout().flush();
     let _ = std::io::stdin().lock().read_line(&mut String::new());
-}
-
-/// Without a TTY to wait on, a freshly launched browser is polled until its port answers.
-fn wait_for_port(port: u16, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if cdp_answers(port) {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(300));
-    }
-    false
-}
-
-async fn run_mode(
-    mode: RunMode,
-    lms: &Lms,
-    config: &Config,
-    env: &HashMap<String, String>,
-) -> Result<Vec<(&'static str, Value)>, String> {
-    let mut runners = Live { config: config.clone() };
-    let fields = match mode {
-        RunMode::Course => course::run(lms, &mut runners, CourseOptions::default()).await.map(|o| o.fields()),
-        RunMode::Unit => unit::run(lms, &mut runners).await.map(|o| o.fields()),
-        RunMode::Exercise => exercise::run(lms, config).await.map(|o| o.fields()),
-        RunMode::Iframe => iframe::run(lms, config).await.map(|o| o.fields()),
-        RunMode::Reading => reading::run(lms).await.map(|o| o.fields()),
-        RunMode::Checkpoint => checkpoint::run(lms, &mut checkpoint::LiveAttempt).await.map(|o| o.fields()),
-        RunMode::FinalTest => final_test_runner::run(lms, config, env).await.map(|o| o.fields()),
-    };
-    fields.map_err(|e| e.to_string())
 }
 
 /// Pointer-clicks the row, waits for the route change, then clicks Start or Continue when one mounts.
@@ -270,7 +123,7 @@ fn display_available() -> bool {
 /// Attaches and resolves the run mode; dev modes finish here and return None.
 async fn prepare(mode: Mode, env: &HashMap<String, String>, port: u16) -> Option<(Lms, RunMode)> {
     if let Mode::Run { url, .. } = &mode {
-        let launched = ensure_browser(env, port, url).unwrap_or_else(|e| fail(&e));
+        let launched = launch_browser(env, port, url).unwrap_or_else(|e| fail(&e));
         if std::io::stdin().is_terminal() {
             wait_for_enter("Log in and open the exercise, then press Enter to start the bot... ");
         } else if launched && !wait_for_port(port, Duration::from_secs(30)) {
@@ -305,7 +158,7 @@ async fn prepare(mode: Mode, env: &HashMap<String, String>, port: u16) -> Option
             println!("Detecting exercise type...");
             let detected = detect_mode(&lms).await.unwrap_or_else(|e| fail(&e.to_string()));
             let Some(detected) = detected else {
-                fail("Could not auto-detect the exercise type. Run with an explicit mode instead: beelingua <course|unit|exercise|iframe|reading|checkpoint>");
+                fail(DETECT_FAILED);
             };
             println!("Detected: {}", detected.name());
             RunMode::from_detected(detected)
@@ -313,9 +166,6 @@ async fn prepare(mode: Mode, env: &HashMap<String, String>, port: u16) -> Option
     };
     Some((lms, run))
 }
-
-/// Exit code 130, as for Ctrl-C, when the window closes before the run ends.
-const STOPPED: i32 = 130;
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -347,20 +197,8 @@ fn main() {
     // The window owns the main thread (macOS requires it), so the bot runs its runtime beside it.
     let bot = std::thread::spawn(move || {
         runtime.block_on(async move {
-            let finish = async {
-                match run_mode(run, &lms, &config, &env).await {
-                    Ok(fields) => {
-                        logger::info("Run finished", fields);
-                        0
-                    }
-                    Err(e) => {
-                        logger::error("Run failed", [("error", json!(e))]);
-                        1
-                    }
-                }
-            };
             tokio::select! {
-                code = finish => code,
+                code = run_and_report(run, &lms, &config, &env) => code,
                 Ok(()) = stopped => STOPPED,
             }
         })
@@ -403,7 +241,6 @@ mod tests {
             parse_args(&args(&["checkpoint"])),
             Ok(Mode::Run { mode: Some(RunMode::Checkpoint), url: DEFAULT_URL.to_string() })
         );
-        assert_eq!(RunMode::from_detected(PageMode::Checkpoint), RunMode::Checkpoint);
         assert_eq!(
             parse_args(&args(&["ui-demo", "--snap", "a.png"])),
             Ok(Mode::UiDemo { rune_args: args(&["--snap", "a.png"]) })
@@ -412,13 +249,6 @@ mod tests {
             parse_args(&args(&["final-test"])),
             Ok(Mode::Run { mode: Some(RunMode::FinalTest), url: DEFAULT_URL.to_string() })
         );
-    }
-
-    #[test]
-    fn run_mode_names_parse_back_to_the_same_mode() {
-        for name in ["course", "unit", "exercise", "iframe", "reading", "checkpoint", "final-test"] {
-            assert_eq!(RunMode::parse(name).map(RunMode::name), Some(name));
-        }
     }
 
     #[test]

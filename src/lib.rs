@@ -10,6 +10,7 @@ pub mod llm;
 pub mod logger;
 pub mod question_types;
 pub mod runners;
+pub mod session;
 pub mod strategy;
 #[cfg(feature = "ui")]
 pub mod ui;

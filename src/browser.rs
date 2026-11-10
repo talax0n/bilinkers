@@ -15,7 +15,14 @@ pub struct Lms {
     pub browser: Browser,
     pub page: Page,
     frames: FrameEvaluator,
-    _events: JoinHandle<()>,
+    events: JoinHandle<()>,
+}
+
+// A window can start many runs in one process, so each run's CDP event task ends with it.
+impl Drop for Lms {
+    fn drop(&mut self) {
+        self.events.abort();
+    }
 }
 
 #[derive(Debug)]
@@ -57,7 +64,7 @@ pub async fn attach_to_lms(port: u16) -> Result<Lms, AttachError> {
         if url.contains(LMS_HOST) {
             // Pointer events stall on a background tab, and switchTo().window() activated it too.
             page.bring_to_front().await.map_err(|e| AttachError::Connect(e.to_string()))?;
-            return Ok(Lms { browser, page, frames: FrameEvaluator::default(), _events: events });
+            return Ok(Lms { browser, page, frames: FrameEvaluator::default(), events });
         }
         urls.push(url);
     }
