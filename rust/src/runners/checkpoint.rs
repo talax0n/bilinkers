@@ -358,17 +358,30 @@ impl CheckpointPage for Lms {}
 pub enum Completion {
     AllAnswered,
     /// The leftover pills did not shrink on the last pass; they just don't fit this letter.
-    NoProgress { unanswered: Vec<u64> },
-    PassesExhausted { unanswered: Vec<u64> },
+    NoProgress {
+        unanswered: Vec<u64>,
+    },
+    PassesExhausted {
+        unanswered: Vec<u64>,
+    },
 }
 
 /// What `answerAllQuestions` returned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnswerResult {
     /// No pills, or a pill that never turned active.
-    Unhandled { question_num: u32 },
-    Submitted { question_num: u32, completion: Completion },
-    SubmitFailed { question_num: u32, completion: Completion, submit: Submit },
+    Unhandled {
+        question_num: u32,
+    },
+    Submitted {
+        question_num: u32,
+        completion: Completion,
+    },
+    SubmitFailed {
+        question_num: u32,
+        completion: Completion,
+        submit: Submit,
+    },
 }
 
 async fn find_pills<P: CheckpointPage>(page: &P) -> PageResult<Vec<u32>> {
@@ -575,11 +588,9 @@ pub enum AttemptResult {
 impl AttemptResult {
     fn fields(self) -> Vec<(&'static str, Value)> {
         match self {
-            AttemptResult::Complete { question_num, score } => vec![
-                ("status", json!("complete")),
-                ("questionNum", json!(question_num)),
-                ("score", json!(score)),
-            ],
+            AttemptResult::Complete { question_num, score } => {
+                vec![("status", json!("complete")), ("questionNum", json!(question_num)), ("score", json!(score))]
+            }
             AttemptResult::Unhandled { question_num } => {
                 vec![("status", json!("unhandled")), ("questionNum", json!(question_num))]
             }
@@ -634,7 +645,10 @@ pub async fn run<P: CheckpointPage, R: AttemptRunner<P>>(page: &P, runner: &mut 
     loop {
         attempt += 1;
         let letter = LETTERS[letter_index % LETTERS.len()];
-        logger::info("Starting checkpoint attempt", [("attempt", json!(attempt)), ("letter", json!(letter.to_string()))]);
+        logger::info(
+            "Starting checkpoint attempt",
+            [("attempt", json!(attempt)), ("letter", json!(letter.to_string()))],
+        );
 
         if !page.click_gate_button().await? {
             logger::warn(

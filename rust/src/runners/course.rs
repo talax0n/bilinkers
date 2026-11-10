@@ -463,7 +463,9 @@ mod tests {
         );
         // The unit run leaves progress frozen, so only the tried-node memory ends the loop.
         let result =
-            run(&page, &mut FakeRunners { unit: Some(UnitOutcome::Complete { total: 6 }), checkpoint: None }, quick()).await.unwrap();
+            run(&page, &mut FakeRunners { unit: Some(UnitOutcome::Complete { total: 6 }), checkpoint: None }, quick())
+                .await
+                .unwrap();
         assert_eq!(*page.opened.borrow(), vec!["Unit1"]);
         assert_eq!(result.status(), "complete");
     }
@@ -564,7 +566,8 @@ mod tests {
             Progress { unit: count(0, 1), checkpoint: count(0, 0) },
         );
         let stuck = UnitOutcome::Stuck(UnitStuck::RowNotClicked { title: "Interactive Grammar Activity".to_string() });
-        let result = run(&page, &mut FakeRunners { unit: Some(stuck.clone()), checkpoint: None }, quick()).await.unwrap();
+        let result =
+            run(&page, &mut FakeRunners { unit: Some(stuck.clone()), checkpoint: None }, quick()).await.unwrap();
         assert_eq!(
             result,
             CourseOutcome::Stuck(CourseStuck::NodeFailed {
@@ -582,8 +585,7 @@ mod tests {
                 Progress { unit: count(2, 3), checkpoint: count(0, 1) },
             );
             let report = CheckpointReport::new(outcome, 1);
-            let result =
-                run(&page, &mut FakeRunners { unit: None, checkpoint: Some(report) }, quick()).await.unwrap();
+            let result = run(&page, &mut FakeRunners { unit: None, checkpoint: Some(report) }, quick()).await.unwrap();
             assert_eq!(*page.opened.borrow(), vec!["Checkpoint1"]);
             assert_eq!(
                 result,
