@@ -3,6 +3,8 @@ name: release
 on:
   push:
     tags: ["v*"]
+    # A tag run can only restore caches saved on its own ref or on main, so main builds keep them warm.
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -13,6 +15,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked
       - run: Copy-Item target/release/bilinkers.exe bilinkers-windows-x64.exe
       - uses: actions/upload-artifact@v4
@@ -22,32 +25,54 @@ jobs:
 
   macos:
     runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
     steps:
       - uses: actions/checkout@v4
-      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
-      - run: cargo build --release --locked --target aarch64-apple-darwin
-      - run: cargo build --release --locked --target x86_64-apple-darwin
+      - run: rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/bilinkers
+
+  dmg:
+    needs: macos
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: macos-*
       - name: Package universal dmg
         run: |
           mkdir dmg
           lipo -create -output dmg/bilinkers \
-            target/aarch64-apple-darwin/release/bilinkers \
-            target/x86_64-apple-darwin/release/bilinkers
+            macos-aarch64-apple-darwin/bilinkers \
+            macos-x86_64-apple-darwin/bilinkers
+          chmod +x dmg/bilinkers
           cp .env.example dmg/
           hdiutil create -volname Bilinkers -srcfolder dmg -format UDZO bilinkers-macos-universal.dmg
       - uses: actions/upload-artifact@v4
         with:
-          name: macos
+          name: dmg
           path: bilinkers-macos-universal.dmg
 
   release:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [windows, macos]
+    needs: [windows, dmg]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
-          merge-multiple: true
+          name: windows
+      - uses: actions/download-artifact@v4
+        with:
+          name: dmg
       - run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes bilinkers-windows-x64.exe bilinkers-macos-universal.dmg
         env:
           GH_TOKEN: ${{ github.token }}
