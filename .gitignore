@@ -7,3 +7,4 @@ logs/
 checkpoint-capture.json
 final-test-answers.md
 final-test-answers.json
+rust/target/
