@@ -134,15 +134,6 @@ pub fn parse_dotenv(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The process environment plus `.env` entries it does not already set, like `dotenv.config()`.
-pub fn environment(dotenv: Option<&str>) -> HashMap<String, String> {
-    let mut env: HashMap<String, String> = std::env::vars().collect();
-    for (key, value) in dotenv.map(parse_dotenv).unwrap_or_default() {
-        env.entry(key).or_insert(value);
-    }
-    env
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

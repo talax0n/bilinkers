@@ -136,8 +136,10 @@ impl CodexClient {
         let dir = TempDir::new("beelingua-codex-").map_err(|e| LlmError::Failed(format!("codex exec failed: {e}")))?;
         let out = dir.0.join("answer.txt");
         let args = self.args(&dir.0, &out);
-        let mut child = Command::new("codex")
+        let (program, path) = crate::setup::codex_program();
+        let mut child = Command::new(program)
             .args(&args)
+            .env("PATH", path)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())

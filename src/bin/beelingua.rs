@@ -6,14 +6,16 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::time::Duration;
 
 use beelingua::browser::{attach_to_lms, Driver, FramedPage, Lms};
-use beelingua::config::{build_config, environment};
+use beelingua::config::build_config;
 use beelingua::detect::detect_mode;
 use beelingua::runners::unit::UnitPage;
 use beelingua::session::{ensure_browser, run_and_report, wait_for_port, Launch, RunMode, DETECT_FAILED};
+use beelingua::setup::{settings_path, EnvLayers};
 
 const USAGE: &str = "usage: beelingua [--no-ui] [course|unit|exercise|iframe|reading|checkpoint|final-test] [url]
        beelingua attach | open-row \"<row title>\" | eval-frame \"<script>\" | ui-demo <rune flags>
 Env: CDP_PORT (default 9222), BROWSER (chrome|brave|edge), BROWSER_BINARY_PATH, LLM_PROVIDER=codex
+Settings are read from the environment, then ./.env, then the window's settings.env.
 On a terminal with a display a run opens a window to pick the mode and start; --no-ui or NO_TUI=1
 keeps the terminal prompts and prints JSON lines.
 final-test is read-only unless FINAL_TEST_AUTO_ANSWER=1 or FINAL_TEST_GUESS_LISTENING=1
@@ -275,7 +277,7 @@ fn main() {
     if let Mode::UiDemo { .. } = mode {
         fail("ui-demo needs the ui feature");
     }
-    let env = environment(std::fs::read_to_string(".env").ok().as_deref());
+    let env = EnvLayers::load(settings_path().as_deref()).merged();
     let config = build_config(&env);
     let port = env.get("CDP_PORT").and_then(|p| p.parse().ok()).unwrap_or(9222);
 
