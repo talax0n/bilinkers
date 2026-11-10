@@ -6,7 +6,7 @@
 |---|---|
 | Rust, from [rustup](https://rustup.rs) | Builds Bilinkers. `rust-toolchain.toml` selects Rust 1.99.1, which Rune needs. |
 | Chrome, Brave, Edge, or Chromium | The browser that Bilinkers drives. It searches your computer for them. |
-| [Codex CLI](https://github.com/openai/codex), signed in with `codex login` | Answers the questions that need an LLM. It uses your ChatGPT sign-in, so no API key is stored. Only `iframe` fill-in-blank questions and `final-test` need it. |
+| [Codex CLI](https://github.com/openai/codex), signed in with `codex login` | Answers the questions that need an LLM. It uses your ChatGPT sign-in, so no API key is stored. Only `iframe` fill-in-blank questions and `final-test` need it. Without Codex, the window's Install Codex button downloads it from OpenAI's GitHub releases into the app's folder, with no admin rights or npm. You can also install it yourself with `npm i -g @openai/codex`. |
 
 ## Quick start
 
@@ -90,6 +90,8 @@ cargo run --release -- [--no-ui] [mode] [url]
 | `src/bin/` | The command-line entry point and argument parsing |
 | `src/session.rs` | Run modes, browser launch, and the run thread that the terminal and the window share |
 | `src/setup.rs` | The Codex sign-in check, the installed browser search, and the settings file |
+| `src/install.rs` | Downloads the standalone Codex CLI into the app's bin dir |
+| `src/devtools.rs` | The debug port's HTTP endpoint and its tab list |
 | `src/browser.rs`, `src/frame.rs` | The CDP connection to the LMS tab and script evaluation inside the activity iframe |
 | `src/detect.rs` | Detects which mode fits the open page |
 | `src/runners/` | One runner per mode |
