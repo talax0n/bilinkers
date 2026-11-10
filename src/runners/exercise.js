@@ -4,7 +4,6 @@ const { createRegistry } = require('../questionTypes/registry');
 const audioMultipleChoice = require('../questionTypes/audioMultipleChoice');
 const readingComprehension = require('../questionTypes/readingComprehension');
 const { processQuestion } = require('../answerLoop');
-const { createClient, answerQuestion } = require('../llm');
 const logger = require('../logger');
 
 // This script attaches to an already-running Chromium-based browser (Chrome,
@@ -15,14 +14,10 @@ const logger = require('../logger');
 // browser launch + login wait for you, or invoke this file directly if the
 // browser is already up.
 
-// These cycle every option until Check reports correct instead of trusting an
-// LLM guess: audioMultipleChoice can't be answered intelligently (the bot
-// can't hear the audio), and readingComprehension has few options (A-D) with
-// in-place Check feedback, so exhausting them is cheaper and more reliable
-// than an LLM call.
-const BLAST_TYPES = new Set(['audioMultipleChoice', 'readingComprehension']);
-
-function blastAnswerFn(options) {
+// Every question here is solved by trying each option until Check reports
+// correct: listening questions can't be heard, and A-D with in-place Check
+// feedback is cheaper and more reliable to exhaust than to ask an LLM about.
+function tryEachOption(options) {
   let attempt = 0;
   return async () => {
     const option = options[attempt % options.length];
@@ -116,8 +111,6 @@ async function main(existingDriver) {
   registry.register(audioMultipleChoice);
   registry.register(readingComprehension);
 
-  const llmClient = createClient(config);
-
   let questionNum = 0;
   for (;;) {
     questionNum += 1;
@@ -134,17 +127,13 @@ async function main(existingDriver) {
     }
 
     const questionData = handler.parse(dom);
-    const isBlastType = BLAST_TYPES.has(handler.name);
 
     const result = await processQuestion({
       driver,
       dom,
       registry,
-      llmClient,
-      model: config.openai.model,
-      instruction: 'Determine the single correct option letter for this question, using the passage/question text and options provided. Respond as JSON: { "answer": "<letter>" }.',
-      retryLimit: isBlastType ? questionData.options.length - 1 : config.retry.maxAnswerRetries,
-      answerQuestionFn: isBlastType ? blastAnswerFn(questionData.options) : answerQuestion,
+      retryLimit: questionData.options.length - 1,
+      answerQuestionFn: tryEachOption(questionData.options),
     });
 
     logger.info('Question processed', { questionNum, type: handler.name, ...result });

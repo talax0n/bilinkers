@@ -105,22 +105,6 @@ async function advance(driver, previousState, timeoutMs = 60000) {
   return false;
 }
 
-// vocabularyIntro pages aren't graded and have nothing to answer, so there's
-// no need to burn an LLM call on them — a no-op stands in for answerQuestion,
-// and the handler's own answer() already clicks "#/n" to move on, so the
-// generic advance() step (which only knows about .quiz-next-btn / #/question-N)
-// is skipped for this type instead of running and wrongly declaring the
-// activity complete. quizMatching is also LLM-free (its answer is derived
-// deterministically from the page's own data-drag/data-drag-target indexes,
-// not guessed), but it isn't self-advancing — it uses the normal
-// .quiz-next-btn Continue flow once Check passes, same as fillInBlank/errorAnalysis.
-const SKIP_LLM_TYPES = new Set(['quizMatching']);
-const SELF_ADVANCING_TYPES = new Set();
-// Non-graded presentation slides — walked forward, never counted or graded
-// as questions (see the main loop).
-const PRESENTATION_TYPES = new Set(['vocabularyIntro']);
-const noopAnswer = async () => ({});
-
 // errorAnalysis is answered by brute force instead of an LLM call: try every
 // non-empty candidate-letter combination in increasing subset size (A, B,
 // ..., A+B, A+C, ...), one per retry, until Check passes. Simpler and more
@@ -171,7 +155,25 @@ function createBruteForceAnswerer() {
     return { answers: candidateLetters };
   };
 }
-const BRUTE_FORCE_TYPES = new Set(['errorAnalysis']);
+
+// Detection order matters: registry.findHandler() returns the first match.
+// The strategy belongs to this runner, not the type: checkpoint.js and
+// final-test.js solve the same pages differently.
+const QUESTION_TYPES = [
+  { type: fillInBlank, solve: 'llm' },
+  { type: errorAnalysis, solve: 'letter-combinations' },
+  // Answer derived from the page's own data-drag/data-drag-target indexes.
+  { type: quizMatching, solve: 'from-page' },
+  // Ungraded slides: answer() clicks #/n itself, so the generic advance() is skipped.
+  { type: vocabularyIntro, solve: 'click-through' },
+];
+const SOLVE_BY_NAME = new Map(QUESTION_TYPES.map(({ type, solve }) => [type.name, solve]));
+
+function answererFor(solve) {
+  if (solve === 'llm') return answerQuestion;
+  if (solve === 'letter-combinations') return createBruteForceAnswerer();
+  return async () => ({});
+}
 
 // existingDriver lets an orchestrator (runners/unit.js) drive one continuous
 // browser session across several activities instead of each script
@@ -180,10 +182,7 @@ const BRUTE_FORCE_TYPES = new Set(['errorAnalysis']);
 async function main(existingDriver) {
   const driver = existingDriver || (await attachToLms());
   const registry = createRegistry();
-  registry.register(fillInBlank);
-  registry.register(errorAnalysis);
-  registry.register(quizMatching);
-  registry.register(vocabularyIntro);
+  QUESTION_TYPES.forEach(({ type }) => registry.register(type));
 
   const llmClient = createClient(config);
 
@@ -210,13 +209,10 @@ async function main(existingDriver) {
       return { status: 'unhandled', slideNum };
     }
 
-    // Presentation slides (a vocabulary unit's word / meaning-and-example
-    // cards) sit between the real questions in the same iframe SPA. They're
-    // not graded and have nothing to answer — just walk them forward via
-    // their own #/n link, without counting or grading them as questions
-    // (otherwise a vocab unit logs dozens of "Question processed" lines for
-    // slides that were never questions).
-    if (PRESENTATION_TYPES.has(handler.name)) {
+    const solve = SOLVE_BY_NAME.get(handler.name);
+    // Vocabulary slides sit between real questions; walking them without
+    // counting keeps the question tally honest.
+    if (solve === 'click-through') {
       await handler.answer(dom.driver);
       await dom.driver.sleep(100 + Math.random() * 100);
       continue;
@@ -229,8 +225,6 @@ async function main(existingDriver) {
     await dom.driver.sleep(100 + Math.random() * 100);
 
     const questionData = handler.parse(dom);
-    const skipLlm = SKIP_LLM_TYPES.has(handler.name);
-    const bruteForce = BRUTE_FORCE_TYPES.has(handler.name);
 
     const result = await processQuestion({
       driver: dom.driver,
@@ -239,8 +233,8 @@ async function main(existingDriver) {
       llmClient,
       model: config.openai.model,
       instruction: buildInstruction(handler, questionData),
-      retryLimit: skipLlm ? 0 : config.retry.maxAnswerRetries,
-      answerQuestionFn: bruteForce ? createBruteForceAnswerer() : skipLlm ? noopAnswer : answerQuestion,
+      retryLimit: solve === 'from-page' ? 0 : config.retry.maxAnswerRetries,
+      answerQuestionFn: answererFor(solve),
     });
 
     logger.info('Question processed', { questionNum, type: handler.name, ...result });
@@ -248,10 +242,6 @@ async function main(existingDriver) {
     if (result.status === 'incorrect') {
       logger.warn('Still incorrect after all retries — stopping instead of advancing', { questionNum });
       return { status: 'incorrect', questionNum };
-    }
-
-    if (SELF_ADVANCING_TYPES.has(handler.name)) {
-      continue;
     }
 
     const advanced = await advance(dom.driver, activityState);
@@ -270,4 +260,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { run: main, readActivityState, waitForActivityChange, advance, createBruteForceAnswerer };
+module.exports = { run: main, readActivityState, waitForActivityChange, advance, createBruteForceAnswerer, QUESTION_TYPES };
