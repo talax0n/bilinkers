@@ -1,15 +1,18 @@
 //! Port of `src/runners/checkpoint.js`.
 //! Site behavior this relies on: docs/platform-notes.md#checkpoint
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
 use super::{CheckpointOutcome, CheckpointReport};
 use crate::browser::{get_current_question_dom, DomWait, Driver, FramedPage, Lms, PageResult};
+use crate::config::Config;
 use crate::js;
+use crate::llm::{CodexClient, LlmError};
 use crate::logger;
-use crate::question_types::{QuestionKind, Registry};
+use crate::question_types::{QuestionData, QuestionKind, Registry};
 
 /// One letter per attempt, cycling A..F. Attempts repeat without limit until the score is 100.
 pub const LETTERS: [char; 6] = ['A', 'B', 'C', 'D', 'E', 'F'];
@@ -447,10 +450,10 @@ async fn answer_pill<P: CheckpointPage>(page: &P, n: u32, letter: char) -> Resul
     Ok(selected)
 }
 
-/// One shared letter per attempt. Correct pills lock and are skipped on the next attempt.
+/// `letters` picks each pill's letter. Correct pills lock and are skipped on the next attempt.
 pub async fn answer_all_questions<P: CheckpointPage>(
     page: &P,
-    letter: char,
+    letters: &mut impl PickLetter,
     max_completion_passes: u32,
 ) -> PageResult<AnswerResult> {
     page.question_kind(DomWait::default()).await?;
@@ -485,6 +488,7 @@ pub async fn answer_all_questions<P: CheckpointPage>(
                 continue; // locked, already correct
             }
 
+            let letter = letters.pick(page, n, kind).await;
             match answer_pill(page, n, letter).await {
                 Ok(selected) => {
                     answered += 1;
@@ -601,8 +605,11 @@ impl AttemptResult {
     }
 }
 
-pub async fn run_checkpoint_attempt<P: CheckpointPage>(page: &P, letter: char) -> PageResult<AttemptResult> {
-    let question_num = match answer_all_questions(page, letter, MAX_COMPLETION_PASSES).await? {
+pub async fn run_checkpoint_attempt<P: CheckpointPage>(
+    page: &P,
+    letters: &mut impl PickLetter,
+) -> PageResult<AttemptResult> {
+    let question_num = match answer_all_questions(page, letters, MAX_COMPLETION_PASSES).await? {
         AnswerResult::Unhandled { question_num } => return Ok(AttemptResult::Unhandled { question_num }),
         AnswerResult::SubmitFailed { question_num, .. } => return Ok(AttemptResult::SubmitFailed { question_num }),
         AnswerResult::Submitted { question_num, .. } => question_num,
@@ -610,7 +617,7 @@ pub async fn run_checkpoint_attempt<P: CheckpointPage>(page: &P, letter: char) -
     let score = page.wait_for_score().await?;
     logger::info(
         "Checkpoint attempt graded",
-        [("questionNum", json!(question_num)), ("letter", json!(letter.to_string())), ("score", json!(score))],
+        [("questionNum", json!(question_num)), ("score", json!(score))],
     );
     Ok(AttemptResult::Complete { question_num, score })
 }
@@ -621,11 +628,122 @@ pub trait AttemptRunner<P> {
     async fn attempt(&mut self, page: &P, letter: char) -> PageResult<AttemptResult>;
 }
 
-pub struct LiveAttempt;
+/// Answers from a `LetterPlan` that keeps each pill's tried letters across attempts.
+pub struct LiveAttempt {
+    plan: LetterPlan,
+}
+
+impl LiveAttempt {
+    pub fn new(config: &Config) -> LiveAttempt {
+        LiveAttempt { plan: LetterPlan::new(CodexClient::from_config(config).ok()) }
+    }
+}
 
 impl<P: CheckpointPage> AttemptRunner<P> for LiveAttempt {
-    async fn attempt(&mut self, page: &P, letter: char) -> PageResult<AttemptResult> {
-        run_checkpoint_attempt(page, letter).await
+    /// `letter` is the shared round letter; the plan's per-pill letters replace it.
+    async fn attempt(&mut self, page: &P, _letter: char) -> PageResult<AttemptResult> {
+        self.plan.start_attempt();
+        run_checkpoint_attempt(page, &mut self.plan).await
+    }
+}
+
+/// Chooses the letter a pill is answered with on this attempt.
+#[allow(async_fn_in_trait)]
+pub trait PickLetter {
+    async fn pick<P: CheckpointPage>(&mut self, page: &P, pill: u32, kind: QuestionKind) -> char;
+}
+
+/// One shared letter for every pill.
+impl PickLetter for char {
+    async fn pick<P: CheckpointPage>(&mut self, _page: &P, _pill: u32, _kind: QuestionKind) -> char {
+        *self
+    }
+}
+
+/// Checkpoints never say which question was wrong, so each pill remembers the letters it has
+/// tried. A pill's first try takes the LLM's guess when there is one, then the first untried
+/// letter. Without guesses this is the old one-letter-per-attempt cycle.
+#[derive(Debug, Default)]
+pub struct LetterPlan {
+    llm: Option<CodexClient>,
+    tried: HashMap<u32, Vec<char>>,
+    this_attempt: HashMap<u32, char>,
+}
+
+impl LetterPlan {
+    pub fn new(llm: Option<CodexClient>) -> LetterPlan {
+        LetterPlan { llm, ..LetterPlan::default() }
+    }
+
+    pub fn start_attempt(&mut self) {
+        self.this_attempt.clear();
+    }
+
+    fn is_first_try(&self, pill: u32) -> bool {
+        !self.tried.contains_key(&pill) && !self.this_attempt.contains_key(&pill)
+    }
+
+    /// The same letter on every completion pass of one attempt. All six tried starts over.
+    pub fn letter_for(&mut self, pill: u32, guess: Option<char>) -> char {
+        if let Some(&letter) = self.this_attempt.get(&pill) {
+            return letter;
+        }
+        let tried = self.tried.entry(pill).or_default();
+        if tried.len() >= LETTERS.len() {
+            tried.clear();
+        }
+        let letter = guess
+            .filter(|g| !tried.contains(g))
+            .or_else(|| LETTERS.iter().copied().find(|l| !tried.contains(l)))
+            .expect("fewer than six letters tried");
+        tried.push(letter);
+        self.this_attempt.insert(pill, letter);
+        letter
+    }
+
+    async fn guess<P: CheckpointPage>(&mut self, page: &P) -> Option<char> {
+        let llm = self.llm.as_ref()?;
+        let question = get_current_question_dom(page, DomWait::iframe_wait(600)).await.ok()?;
+        let QuestionData::ReadingComprehension(data) = QuestionKind::ReadingComprehension.parse(&question.dom) else {
+            return None;
+        };
+        // Grouped pills answer several sub-questions with one letter; a single guess can't cover them.
+        if page.execute_script(GROUP_COUNT, &[]).await.ok()? != json!(1) {
+            return None;
+        }
+        match llm.answer_question(GUESS_INSTRUCTION, &data, None).await {
+            Ok(reply) => {
+                let letter = reply["answer"].as_str()?.trim().chars().next()?.to_ascii_uppercase();
+                data.options.iter().any(|o| o.letter == Some(letter)).then_some(letter)
+            }
+            Err(LlmError::NotSignedIn) => {
+                logger::warn("Checkpoint: Codex is not signed in, cycling letters without guesses", []);
+                self.llm = None;
+                None
+            }
+            Err(LlmError::Failed(error)) => {
+                logger::warn("Checkpoint: LLM guess failed, using the next letter", [("error", json!(error))]);
+                None
+            }
+        }
+    }
+}
+
+const GUESS_INSTRUCTION: &str = "Pick the one correct option for this question. Reply with JSON {\"answer\": \"<option letter>\"}.";
+
+/// Option groups on the active question: one "A" button per group.
+const GROUP_COUNT: &str = "return [...document.querySelectorAll('button.bl-w-full.justify-content-start')].filter((b) => b.textContent.trim().startsWith('A')).length";
+
+impl PickLetter for LetterPlan {
+    // ponytail: one LLM call per pill in sequence, about 6 s each, so a 30-pill attempt 1 spends ~3 min
+    // guessing. Read every pill first and guess concurrently if that wait matters.
+    async fn pick<P: CheckpointPage>(&mut self, page: &P, pill: u32, kind: QuestionKind) -> char {
+        let guess = if kind == QuestionKind::ReadingComprehension && self.is_first_try(pill) {
+            self.guess(page).await
+        } else {
+            None
+        };
+        self.letter_for(pill, guess)
     }
 }
 
@@ -866,6 +984,36 @@ mod tests {
         AnswerResult::Submitted { question_num, completion: Completion::AllAnswered }
     }
 
+    /// The letters one pill gets over `attempts` attempts, with `guess` offered on every try.
+    fn letters_over(attempts: usize, guess: Option<char>) -> String {
+        let mut plan = LetterPlan::new(None);
+        (0..attempts)
+            .map(|_| {
+                plan.start_attempt();
+                plan.letter_for(7, guess)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn without_a_guess_a_pill_cycles_letters_like_the_shared_round_letter_did() {
+        assert_eq!(letters_over(8, None), "ABCDEFAB");
+    }
+
+    #[test]
+    fn a_guess_goes_first_and_is_not_repeated_until_every_letter_was_tried() {
+        assert_eq!(letters_over(8, Some('C')), "CABDEFCA");
+    }
+
+    #[test]
+    fn completion_passes_in_one_attempt_reuse_the_pill_letter() {
+        let mut plan = LetterPlan::new(None);
+        plan.start_attempt();
+        assert_eq!((plan.letter_for(1, Some('D')), plan.letter_for(1, None), plan.letter_for(2, None)), ('D', 'D', 'A'));
+        plan.start_attempt();
+        assert_eq!((plan.letter_for(1, None), plan.letter_for(2, None)), ('A', 'B'));
+    }
+
     #[tokio::test]
     async fn passes_on_the_first_attempt_when_the_score_is_100() {
         let page = gate_page(true);
@@ -1012,7 +1160,7 @@ mod tests {
             h.submit = always(Submit::Confirmed);
         });
 
-        let result = answer_all_questions(&page, 'A', MAX_COMPLETION_PASSES).await.unwrap();
+        let result = answer_all_questions(&page, &mut 'A', MAX_COMPLETION_PASSES).await.unwrap();
         drop(page);
         // The last pill is re-navigated before Submit.
         assert_eq!(visits.into_inner(), vec![1, 3, 3]);
@@ -1051,7 +1199,7 @@ mod tests {
                 h.submit = always(Submit::Confirmed);
             });
 
-        let result = answer_all_questions(&page, 'A', MAX_COMPLETION_PASSES).await.unwrap();
+        let result = answer_all_questions(&page, &mut 'A', MAX_COMPLETION_PASSES).await.unwrap();
         drop(page);
         // Pill 2 is clicked twice (miss, retry), then again for the last-pill nav before Submit.
         assert_eq!(click_attempts.into_inner(), vec![1, 2, 2, 2]);
@@ -1097,7 +1245,7 @@ mod tests {
             }));
         });
 
-        let result = answer_all_questions(&page, 'A', MAX_COMPLETION_PASSES).await.unwrap();
+        let result = answer_all_questions(&page, &mut 'A', MAX_COMPLETION_PASSES).await.unwrap();
         drop(page);
         assert_eq!(answered_pills.into_inner(), vec![(1, 'A'), (3, 'A')]);
         assert_eq!(saved_pills.into_inner(), vec![1, 3]);
@@ -1134,7 +1282,7 @@ mod tests {
             h.submit = always(Submit::Confirmed);
         });
 
-        answer_all_questions(&page, 'C', MAX_COMPLETION_PASSES).await.unwrap();
+        answer_all_questions(&page, &mut 'C', MAX_COMPLETION_PASSES).await.unwrap();
         drop(page);
         let letters_used = letters_used.into_inner();
         assert_eq!(letters_used.len(), 6);
@@ -1171,12 +1319,12 @@ mod tests {
             })
         };
 
-        answer_all_questions(&page(), 'A', MAX_COMPLETION_PASSES).await.unwrap();
+        answer_all_questions(&page(), &mut 'A', MAX_COMPLETION_PASSES).await.unwrap();
         assert_eq!(*letters_used.borrow(), vec!['A', 'A']);
 
         pill1_locked.set(true); // pill 1's A was graded correct, so it is frozen
         letters_used.borrow_mut().clear();
-        answer_all_questions(&page(), 'B', MAX_COMPLETION_PASSES).await.unwrap();
+        answer_all_questions(&page(), &mut 'B', MAX_COMPLETION_PASSES).await.unwrap();
         assert_eq!(*letters_used.borrow(), vec!['B']); // only pill 3 gets the new letter
     }
 
@@ -1212,7 +1360,7 @@ mod tests {
             }));
         });
 
-        let result = answer_all_questions(&page, 'A', 3).await.unwrap();
+        let result = answer_all_questions(&page, &mut 'A', 3).await.unwrap();
         drop(page);
         // Not unhandled: a letter that stops resolving new pills is expected brute-force
         // behaviour, so the attempt still submits and the outer loop gets a real score.
@@ -1252,7 +1400,7 @@ mod tests {
             h.submit = always(Submit::Confirmed);
         });
 
-        answer_all_questions(&page, 'E', 2).await.unwrap();
+        answer_all_questions(&page, &mut 'E', 2).await.unwrap();
         drop(page);
         let letters_used = letters_used.into_inner();
         assert!(!letters_used.is_empty());
@@ -1400,7 +1548,7 @@ mod tests {
             h.submit = always(Submit::NoConfirm);
         });
 
-        let result = answer_all_questions(&page, 'A', MAX_COMPLETION_PASSES).await.unwrap();
+        let result = answer_all_questions(&page, &mut 'A', MAX_COMPLETION_PASSES).await.unwrap();
         assert_eq!(
             result,
             AnswerResult::SubmitFailed {

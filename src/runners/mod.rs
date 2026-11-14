@@ -217,6 +217,6 @@ impl<P: UnitPage + checkpoint::CheckpointPage> CourseNodeRunners<P> for Live {
     }
 
     async fn checkpoint(&mut self, page: &P) -> PageResult<CheckpointReport> {
-        checkpoint::run(page, &mut checkpoint::LiveAttempt).await
+        checkpoint::run(page, &mut checkpoint::LiveAttempt::new(&self.config)).await
     }
 }
