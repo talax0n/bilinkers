@@ -126,9 +126,14 @@ async fn dump(lms: &Lms, seconds: u64) -> Result<String, String> {
         (Vec::new(), None)
     } else {
         println!("Recording for {seconds} s. Click Check, Skip or the next question now so its data loads.");
-        let responses = bilinkers::dump::record_responses(&lms.browser, &lms.page, Duration::from_secs(seconds))
-            .await
-            .map_err(err)?;
+        let responses = bilinkers::dump::record_responses(
+            &lms.browser,
+            &lms.page,
+            Duration::from_secs(seconds),
+            bilinkers::dump::Recording::Listen,
+        )
+        .await
+        .map_err(err)?;
         (responses, Some(bilinkers::dump::snapshot(lms).await.map_err(err)?))
     };
     let captured_at_unix =

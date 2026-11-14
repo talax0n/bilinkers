@@ -138,12 +138,33 @@ impl Recorder {
 /// Body requests are numbered from here, clear of the `Network.enable` call.
 const BODY_IDS: i64 = 1000;
 
+/// What a recording does besides listen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recording<'a> {
+    /// Listens for the whole window while the user clicks.
+    Listen,
+    /// Reloads the tab once listening, and ends early once a reply whose URL contains this arrives.
+    ReloadUntil(&'a str),
+}
+
 /// Records the tab's XHR and fetch bodies for `window`, over a raw session to the tab's own
 /// target. An out-of-process iframe's requests belong to another target and are not seen.
-pub async fn record_responses(browser: &Browser, page: &Page, window: Duration) -> PageResult<Vec<CapturedResponse>> {
+pub async fn record_responses(
+    browser: &Browser,
+    page: &Page,
+    window: Duration,
+    recording: Recording<'_>,
+) -> PageResult<Vec<CapturedResponse>> {
     let mut session = attach(browser, page.target_id().clone()).await?;
     let send = |message: Value| SendMessageToTarget { session_id: session.id.clone(), message: message.to_string() };
     browser.execute(send(json!({ "id": 1, "method": "Network.enable" }))).await?;
+    let stop_at = match recording {
+        Recording::Listen => None,
+        Recording::ReloadUntil(url_part) => {
+            browser.execute(send(json!({ "id": 2, "method": "Page.reload" }))).await?;
+            Some(url_part)
+        }
+    };
 
     let mut recorder = Recorder::default();
     let deadline = Instant::now() + window;
@@ -160,6 +181,9 @@ pub async fn record_responses(browser: &Browser, page: &Page, window: Duration) 
         let Ok(message) = serde_json::from_str::<Value>(&event.message) else { continue };
         if let Some(command) = recorder.on_message(&message) {
             browser.execute(send(command)).await?;
+        }
+        if stop_at.is_some_and(|part| recorder.captured.iter().any(|r| r.url.contains(part))) {
+            break;
         }
     }
     let _ = browser.execute(DetachFromTargetParams::builder().session_id(session.id.clone()).build()).await;

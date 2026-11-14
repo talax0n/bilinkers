@@ -5,14 +5,16 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::{ActivityOutcome, ActivityReport};
-use crate::answer_loop::{process_question, QuestionResult};
+use super::{native, ActivityOutcome, ActivityReport};
+use crate::answer_loop::{process_question, Outcome, QuestionResult};
 use crate::browser::{
     get_current_question_dom, go_to_next_question, jittered, DomWait, Driver, FramedPage, PageError, PageResult,
     PageSleeper, Scoped,
 };
 use crate::config::Config;
+use crate::llm::CodexClient;
 use crate::logger;
+use crate::question_api::{find_on_page, ApiQuestion};
 use crate::question_types::{LiveHandler, QuestionData, QuestionKind, Registry};
 use crate::strategy::{TryEachOption, EXERCISE_QUESTION_TYPES};
 
@@ -102,12 +104,16 @@ pub fn question_fields(question_num: u32, kind: QuestionKind, result: QuestionRe
     fields
 }
 
-/// No LLM. Listening can't be heard, and in-place Check makes trying each option cheap.
+/// Lettered option questions need no LLM: listening can't be heard, and in-place Check makes
+/// trying each option cheap. Other native questions are read off the question API (src/runners/native.rs),
+/// and only their short answers may ask the LLM.
 pub async fn run<P: FramedPage>(page: &P, config: &Config) -> PageResult<ActivityReport> {
     let mut registry = Registry::new();
     for (kind, _) in EXERCISE_QUESTION_TYPES {
         registry.register(kind);
     }
+    let llm = CodexClient::from_config(config).ok();
+    let mut api_questions: Option<Vec<ApiQuestion>> = None;
 
     let mut question_num = 0;
     loop {
@@ -115,9 +121,43 @@ pub async fn run<P: FramedPage>(page: &P, config: &Config) -> PageResult<Activit
         // Native exercises have no iframe, so skip the long LTI iframe wait.
         let question = get_current_question_dom(page, DomWait::iframe_wait(300)).await?;
         let Some(kind) = registry.find_kind(&question.dom) else {
-            save_unhandled(config, &format!("run-exercise-q{question_num}"), &question.dom.outer_html);
-            logger::warn("Unhandled question type — stopping", [("questionNum", json!(question_num))]);
-            return Ok(ActivityReport::new(ActivityOutcome::Unhandled).question_num(question_num));
+            if api_questions.is_none() {
+                api_questions = Some(native::load_questions(page).await?);
+            }
+            let page_text = page.execute_script(native::PAGE_TEXT, &[]).await?;
+            let questions = api_questions.as_deref().unwrap_or_default();
+            let found = find_on_page(questions, page_text.as_str().unwrap_or_default());
+            let result = match found {
+                Some(q) => native::solve(page, q, llm.as_ref(), config.retry.max_answer_retries).await?,
+                None => QuestionResult::Unhandled,
+            };
+            if let Some(q) = found {
+                question_num = q.no;
+                let mut fields = vec![("questionNum", json!(q.no)), ("type", json!(q.kind.name()))];
+                if let QuestionResult::Finished { outcome, attempts } = result {
+                    fields.extend([("status", json!(outcome.name())), ("attempts", json!(attempts))]);
+                }
+                logger::info("Question processed", fields);
+            }
+            match result {
+                QuestionResult::Finished { outcome: Outcome::Correct, .. } => {}
+                QuestionResult::Finished { outcome: Outcome::Incorrect, .. } => {
+                    logger::warn(
+                        "Still incorrect after every answer — stopping",
+                        [("questionNum", json!(question_num))],
+                    );
+                    return Ok(ActivityReport::new(ActivityOutcome::Incorrect).question_num(question_num));
+                }
+                QuestionResult::Unhandled => {
+                    save_unhandled(config, &format!("run-exercise-q{question_num}"), &question.dom.outer_html);
+                    logger::warn("Unhandled question type — stopping", [("questionNum", json!(question_num))]);
+                    return Ok(ActivityReport::new(ActivityOutcome::Unhandled).question_num(question_num));
+                }
+            }
+            if let Some(report) = advance(page, question_num).await? {
+                return Ok(report);
+            }
+            continue;
         };
 
         let options = match kind.parse(&question.dom) {
@@ -139,24 +179,28 @@ pub async fn run<P: FramedPage>(page: &P, config: &Config) -> PageResult<Activit
         .map_err(|e| PageError(e.to_string()))?;
         logger::info("Question processed", question_fields(question_num, kind, result));
 
-        let mut advanced = go_to_next_question(page).await?;
-        if !advanced {
-            advanced = click_pill_number(page, question_num + 1).await?;
-        }
-        if !advanced {
-            let submit = submit_if_present(page).await?;
-            let message = match submit {
-                Submit::Submitted { .. } => "Submitted the exercise",
-                Submit::NotPresent => "No further \"Next\" button or pill — exercise complete",
-            };
-            logger::info(message, [("questionNum", json!(question_num))]);
-            let score = match submit {
-                Submit::Submitted { score } => score,
-                Submit::NotPresent => None,
-            };
-            return Ok(ActivityReport::new(ActivityOutcome::Complete).question_num(question_num).score(score));
+        if let Some(report) = advance(page, question_num).await? {
+            return Ok(report);
         }
     }
+}
+
+/// Moves past `question_num` by Next, else by its pill. With neither, submits and reports the end.
+async fn advance<D: Driver>(page: &D, question_num: u32) -> PageResult<Option<ActivityReport>> {
+    if go_to_next_question(page).await? || click_pill_number(page, question_num + 1).await? {
+        return Ok(None);
+    }
+    let submit = submit_if_present(page).await?;
+    let message = match submit {
+        Submit::Submitted { .. } => "Submitted the exercise",
+        Submit::NotPresent => "No further \"Next\" button or pill — exercise complete",
+    };
+    logger::info(message, [("questionNum", json!(question_num))]);
+    let score = match submit {
+        Submit::Submitted { score } => score,
+        Submit::NotPresent => None,
+    };
+    Ok(Some(ActivityReport::new(ActivityOutcome::Complete).question_num(question_num).score(score)))
 }
 
 #[cfg(test)]

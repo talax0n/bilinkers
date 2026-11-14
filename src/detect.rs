@@ -123,7 +123,9 @@ pub async fn detect_mode<P: FramedPage>(page: &P) -> PageResult<Option<PageMode>
     if is_grouped_reading_layout(&layout) {
         return Ok(Some(PageMode::Reading));
     }
-    if top_html.contains(OPTION_MARKER) {
+    if top_html.contains(OPTION_MARKER)
+        || page.execute_script(crate::runners::native::CHECK_BUTTON, &[]).await? == json!(true)
+    {
         return Ok(Some(PageMode::Exercise));
     }
     if page.execute_script(UNIT_LIST, &[]).await? == json!(true) {

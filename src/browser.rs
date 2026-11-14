@@ -276,6 +276,12 @@ pub trait FramedPage: Driver {
 
     /// `driver.navigate().refresh()`.
     async fn reload(&self) -> PageResult<()>;
+
+    /// Reloads the tab while listening, and returns the body of the first XHR or fetch reply
+    /// whose URL contains `url_part`. `None` when none arrived, or on a page without a network.
+    async fn reload_capturing(&self, _url_part: &str) -> PageResult<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// Which document a script runs in, Selenium's current frame.
@@ -348,6 +354,17 @@ impl FramedPage for Lms {
     async fn reload(&self) -> PageResult<()> {
         self.page.reload().await?;
         Ok(())
+    }
+
+    async fn reload_capturing(&self, url_part: &str) -> PageResult<Option<String>> {
+        let replies = crate::dump::record_responses(
+            &self.browser,
+            &self.page,
+            Duration::from_secs(20),
+            crate::dump::Recording::ReloadUntil(url_part),
+        )
+        .await?;
+        Ok(replies.into_iter().find(|r| r.url.contains(url_part)).map(|r| r.body))
     }
 }
 

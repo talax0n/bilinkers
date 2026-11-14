@@ -138,7 +138,7 @@ const READ_ROWS: &str = r#"
   }).filter((r) => r.title);
 "#;
 
-const CLICK_START_GATE: &str = r#"
+pub(crate) const CLICK_START_GATE: &str = r#"
   const buttons = Array.from(document.querySelectorAll('button'));
   const btn = buttons.find((b) => ['Start', 'Continue'].includes(b.textContent.trim()));
   if (btn && !btn.disabled) { btn.click(); return true; }
@@ -236,7 +236,9 @@ pub trait UnitPage: FramedPage {
             }
 
             let top_html = self.execute_script("return document.documentElement.outerHTML;", &[]).await?;
-            if top_html.as_str().is_some_and(|html| html.contains(OPTION_MARKER)) {
+            if top_html.as_str().is_some_and(|html| html.contains(OPTION_MARKER))
+                || self.execute_script(super::native::CHECK_BUTTON, &[]).await? == json!(true)
+            {
                 return Ok(Some(ActivityKind::Exercise));
             }
 

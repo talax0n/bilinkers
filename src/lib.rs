@@ -11,6 +11,7 @@ pub mod install;
 pub mod js;
 pub mod llm;
 pub mod logger;
+pub mod question_api;
 pub mod question_types;
 pub mod runners;
 pub mod session;
