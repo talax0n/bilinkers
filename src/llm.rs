@@ -209,6 +209,69 @@ impl<D: Serialize> crate::answer_loop::Answerer<D> for LlmAnswerer<'_> {
     }
 }
 
+/// The last answer the LLM gave for each question, saved across runs so a rerun skips the call.
+/// Keyed by the feedback-free prompt. The answer loop stops on the first correct answer, so the
+/// last one stored is the right one unless the question ran out of retries.
+#[derive(Debug, Default)]
+pub struct AnswerCache {
+    path: Option<PathBuf>,
+    entries: std::collections::BTreeMap<String, Value>,
+}
+
+impl AnswerCache {
+    /// A missing or unreadable file starts an empty cache.
+    pub fn load(path: impl Into<PathBuf>) -> AnswerCache {
+        let path = path.into();
+        let entries = std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        AnswerCache { path: Some(path), entries }
+    }
+
+    fn get(&self, key: &str) -> Option<&Value> {
+        self.entries.get(key)
+    }
+
+    /// A failed save only costs the next run an LLM call, so it is logged, not raised.
+    fn put(&mut self, key: String, answer: Value) {
+        self.entries.insert(key, answer);
+        let Some(path) = &self.path else { return };
+        let tmp = path.with_extension("json.tmp");
+        let saved = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&tmp, serde_json::to_vec_pretty(&self.entries).expect("JSON values serialize")))
+            .and_then(|()| std::fs::rename(&tmp, path));
+        if let Err(e) = saved {
+            crate::logger::warn("Could not save the LLM answer cache", [("error", serde_json::json!(e.to_string()))]);
+        }
+    }
+}
+
+/// `LlmAnswerer` that answers a first try from `AnswerCache` and records every answer it gives.
+pub struct CachedLlmAnswerer<'a> {
+    pub llm: &'a CodexClient,
+    pub cache: &'a mut AnswerCache,
+}
+
+impl<D: Serialize> crate::answer_loop::Answerer<D> for CachedLlmAnswerer<'_> {
+    async fn answer(
+        &mut self,
+        instruction: &str,
+        question_data: &D,
+        feedback: Option<&str>,
+    ) -> Result<Value, LlmError> {
+        let key = build_user_prompt(instruction, question_data, None);
+        if feedback.is_none() {
+            if let Some(answer) = self.cache.get(&key) {
+                crate::logger::info("LLM answer from cache", [("answer", answer.clone())]);
+                return Ok(answer.clone());
+            }
+        }
+        let answer = self.llm.answer_question(instruction, question_data, feedback).await?;
+        self.cache.put(key, answer.clone());
+        Ok(answer)
+    }
+}
+
 /// A fresh directory under the system temp dir, removed on drop.
 struct TempDir(PathBuf);
 
@@ -356,6 +419,31 @@ mod tests {
             result.unwrap_err(),
             LlmError::Failed("codex exec failed: stream error: model overloaded".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn a_rerun_answers_a_first_try_from_the_saved_cache_and_a_retry_still_asks_the_llm() {
+        use crate::answer_loop::Answerer;
+        let script = "#!/bin/sh\ncat > /dev/null\necho call >> $LOG\nwhile [ \"$1\" != \"-o\" ]; do shift; done\nprintf '{\"answer\":\"had started\"}' > \"$2\"\n";
+        let client = CodexClient { model: None };
+        let dir = TempDir::new("answer-cache-").unwrap();
+        let file = dir.0.join("nested").join("llm-answers.json");
+        let data = json!({ "sentence": "the film ___ (start)" });
+        let ((first, rerun, retry), bin) = with_fake_codex(script, async {
+            let mut cache = AnswerCache::load(&file);
+            let first = CachedLlmAnswerer { llm: &client, cache: &mut cache }.answer("Fill", &data, None).await;
+            let mut reloaded = AnswerCache::load(&file);
+            let mut answerer = CachedLlmAnswerer { llm: &client, cache: &mut reloaded };
+            let rerun = answerer.answer("Fill", &data, None).await;
+            let retry = answerer.answer("Fill", &data, Some("previous answer was wrong")).await;
+            (first, rerun, retry)
+        })
+        .await;
+        assert_eq!(first, Ok(json!({ "answer": "had started" })));
+        assert_eq!(rerun, Ok(json!({ "answer": "had started" })));
+        assert_eq!(retry, Ok(json!({ "answer": "had started" })));
+        let calls = std::fs::read_to_string(bin.0.join("calls.txt")).unwrap();
+        assert_eq!(calls.lines().count(), 2, "first try and retry call codex, the rerun does not");
     }
 
     /// Needs a signed-in `codex` on PATH: `cargo test -- --ignored real_codex`.

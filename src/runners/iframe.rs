@@ -13,7 +13,7 @@ use crate::browser::{
     get_current_question_dom, jittered, DomWait, Driver, FramedPage, PageError, PageResult, PageSleeper, Scoped,
 };
 use crate::config::Config;
-use crate::llm::{CodexClient, LlmAnswerer, LlmError};
+use crate::llm::{AnswerCache, CachedLlmAnswerer, CodexClient, LlmError};
 use crate::logger;
 use crate::question_types::{LiveHandler, QuestionData, Registry};
 use crate::strategy::{
@@ -80,7 +80,7 @@ pub async fn advance<D: Driver>(driver: &D, previous: &ActivityState, timeout: D
 
 /// The answerer each strategy uses. A fresh brute forcer per question keeps its counter from leaking.
 enum IframeAnswerer<'a> {
-    Llm(LlmAnswerer<'a>),
+    Llm(CachedLlmAnswerer<'a>),
     LetterCombinations(BruteForceAnswerer),
     Empty(EmptyAnswer),
 }
@@ -116,6 +116,7 @@ pub async fn run<P: FramedPage>(page: &P, config: &Config) -> PageResult<Activit
     }
     // Only fillInBlank needs the model, so an unsupported provider fails only when one shows up.
     let llm = CodexClient::from_config(config);
+    let mut llm_cache = AnswerCache::load(&config.paths.llm_cache_file);
 
     let mut question_num = 0;
     let mut slide_num = 0;
@@ -152,7 +153,10 @@ pub async fn run<P: FramedPage>(page: &P, config: &Config) -> PageResult<Activit
         let data = kind.parse(&question.dom);
         let instruction = build_instruction(kind, instruction_text(&data));
         let mut answerer = match solve {
-            Solve::Llm => IframeAnswerer::Llm(LlmAnswerer(llm.as_ref().map_err(|e| PageError(e.to_string()))?)),
+            Solve::Llm => IframeAnswerer::Llm(CachedLlmAnswerer {
+                llm: llm.as_ref().map_err(|e| PageError(e.to_string()))?,
+                cache: &mut llm_cache,
+            }),
             Solve::LetterCombinations => IframeAnswerer::LetterCombinations(BruteForceAnswerer::new()),
             _ => IframeAnswerer::Empty(EmptyAnswer),
         };

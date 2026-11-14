@@ -343,7 +343,7 @@ pub async fn run_mode(
         RunMode::Exercise => exercise::run(lms, config).await.map(|o| o.fields()),
         RunMode::Iframe => iframe::run(lms, config).await.map(|o| o.fields()),
         RunMode::Reading => reading::run(lms).await.map(|o| o.fields()),
-        RunMode::Checkpoint => checkpoint::run(lms, &mut checkpoint::LiveAttempt).await.map(|o| o.fields()),
+        RunMode::Checkpoint => checkpoint::run(lms, &mut checkpoint::LiveAttempt::new(config)).await.map(|o| o.fields()),
         RunMode::FinalTest => final_test_runner::run(lms, config, env).await.map(|o| o.fields()),
     };
     let mut fields = fields.map_err(|e| e.to_string())?;

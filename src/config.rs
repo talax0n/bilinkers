@@ -45,6 +45,8 @@ pub struct Retry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
     pub unhandled_log_dir: String,
+    /// `llm::AnswerCache`, so a rerun of the same activity skips LLM calls it already made.
+    pub llm_cache_file: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,7 +108,10 @@ pub fn build_config(env: &HashMap<String, String>) -> Config {
         retry: Retry {
             max_answer_retries: parse_non_negative_integer(env.get("MAX_ANSWER_RETRIES").map(String::as_str), 25),
         },
-        paths: Paths { unhandled_log_dir: "./logs/unhandled".to_string() },
+        paths: Paths {
+            unhandled_log_dir: "./logs/unhandled".to_string(),
+            llm_cache_file: "./logs/llm-answers.json".to_string(),
+        },
     }
 }
 
