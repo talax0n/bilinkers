@@ -253,14 +253,38 @@ impl Driver for Page {
     }
 
     async fn get(&self, url: &str) -> PageResult<()> {
-        self.goto(url).await?;
-        Ok(())
+        navigate(self, "location.href = arguments[0];", url).await
     }
 
     async fn sleep(&self, ms: u64) {
         tokio::time::sleep(Duration::from_millis(ms)).await;
     }
 }
+
+/// Marks the old document, runs `start` (which navigates), and waits for a document without
+/// the mark to finish loading. chromiumoxide's own `goto` and `reload` wait on events Chrome 157
+/// sends in a shape it cannot read, so they time out after 30 s although the page loaded.
+async fn navigate(page: &Page, start: &str, url: &str) -> PageResult<()> {
+    evaluate_top(page, &format!("window.__bilinkersOldDocument = true; {start}"), &[json!(url)]).await?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // A hash-only change keeps the document, so reaching the URL is enough there.
+        // Evaluates fail while the old document unloads, which only means not yet.
+        if let Ok(state) = evaluate_top(page, NAVIGATION_STATE, &[json!(url)]).await {
+            if state == json!(true) {
+                return Ok(());
+            }
+        }
+    }
+    Err(PageError(format!("navigation to {url} did not finish within 30 s")))
+}
+
+const NAVIGATION_STATE: &str = r#"
+  const target = arguments[0];
+  const fresh = !window.__bilinkersOldDocument || (target.includes('#') && location.href === target);
+  return fresh && document.readyState === 'complete';
+"#;
 
 /// A page whose activity may render inside an iframe.
 #[allow(async_fn_in_trait)]
@@ -352,8 +376,7 @@ impl FramedPage for Lms {
     }
 
     async fn reload(&self) -> PageResult<()> {
-        self.page.reload().await?;
-        Ok(())
+        navigate(&self.page, "location.reload();", "").await
     }
 
     async fn reload_capturing(&self, url_part: &str) -> PageResult<Option<String>> {

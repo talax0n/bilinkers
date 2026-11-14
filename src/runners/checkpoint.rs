@@ -453,8 +453,8 @@ pub async fn answer_all_questions<P: CheckpointPage>(
     letter: char,
     max_completion_passes: u32,
 ) -> PageResult<AnswerResult> {
-    page.question_kind(DomWait::default()).await?;
-    // Pills can render well after the gate click, so poll.
+    // Pills can render well after the gate click, so poll. Checkpoints have no iframe, so no
+    // question read waits here: a default DOM read waited 30 s for one on every attempt.
     let pills = find_pills(page).await?;
     if pills.is_empty() {
         logger::warn("Checkpoint: no nav pills found, stopping", []);

@@ -298,7 +298,18 @@ pub async fn run<P: CoursePage, R: CourseNodeRunners<P>>(
             return Ok(CourseOutcome::Stuck(CourseStuck::NodeNotClicked { label }));
         }
 
-        if page.wait_for_url_change(&before_url, Duration::from_secs(10)).await.is_none() {
+        // A roadmap tab left idle for minutes ignores node clicks until it is loaded again.
+        let mut opened = page.wait_for_url_change(&before_url, Duration::from_secs(10)).await.is_some();
+        if !opened {
+            logger::warn("Course node did not open — reloading the roadmap and clicking again", node_fields());
+            page.get(&course_url).await?;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !page.click_node(&label).await? && Instant::now() < deadline {
+                page.sleep(300).await;
+            }
+            opened = page.wait_for_url_change(&course_url, Duration::from_secs(10)).await.is_some();
+        }
+        if !opened {
             logger::warn("Course node did not open (URL never changed) — stopping", [("label", json!(label))]);
             return Ok(CourseOutcome::Stuck(CourseStuck::NodeDidNotOpen { label }));
         }
@@ -346,6 +357,8 @@ mod tests {
         opened: RefCell<Vec<String>>,
         urls: RefCell<Vec<String>>,
         opens: bool,
+        /// Node clicks that are ignored before one opens, as on an idle roadmap tab.
+        ignored_clicks: std::cell::Cell<u32>,
     }
 
     impl FakeCourse {
@@ -356,6 +369,7 @@ mod tests {
                 opened: RefCell::default(),
                 urls: RefCell::new(vec!["https://lms.binus.ac.id/course".to_string()]),
                 opens: true,
+                ignored_clicks: std::cell::Cell::new(0),
             }
         }
     }
@@ -373,6 +387,10 @@ mod tests {
         }
         async fn sleep(&self, _ms: u64) {}
         async fn wait_for_url_change(&self, _previous: &str, _timeout: Duration) -> Option<String> {
+            if self.ignored_clicks.get() > 0 {
+                self.ignored_clicks.set(self.ignored_clicks.get() - 1);
+                return None;
+            }
             self.opens.then(|| "https://lms.binus.ac.id/course/opened".to_string())
         }
     }
@@ -557,6 +575,24 @@ mod tests {
         page.opens = false;
         let result = run(&page, &mut FakeRunners { unit: None, checkpoint: None }, quick()).await.unwrap();
         assert_eq!(result, CourseOutcome::Stuck(CourseStuck::NodeDidNotOpen { label: "Unit5".to_string() }));
+    }
+
+    #[tokio::test]
+    async fn an_ignored_node_click_reloads_the_roadmap_and_clicks_again() {
+        let page = FakeCourse::new(
+            vec![node(NodeKind::Checkpoint, 1, 300.0, "Checkpoint1")],
+            Progress { unit: count(2, 8), checkpoint: count(0, 3) },
+        );
+        page.ignored_clicks.set(1);
+        let mut runners = FakeRunners { unit: None, checkpoint: None };
+        let result = run(&page, &mut runners, quick()).await.unwrap();
+        assert_ne!(result, CourseOutcome::Stuck(CourseStuck::NodeDidNotOpen { label: "Checkpoint1".to_string() }));
+        assert_eq!(page.opened.borrow()[..2], ["Checkpoint1".to_string(), "Checkpoint1".to_string()]);
+        assert_eq!(
+            page.urls.borrow()[1],
+            "https://lms.binus.ac.id/course",
+            "reloaded the roadmap before the second click"
+        );
     }
 
     #[tokio::test]
