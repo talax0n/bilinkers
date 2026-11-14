@@ -16,6 +16,7 @@ const VERSION: &str = concat!("bilinkers ", env!("CARGO_PKG_VERSION"), ", made b
 
 const USAGE: &str =
     "usage: bilinkers [--no-ui] [island|course|unit|exercise|iframe|reading|checkpoint|final-test] [url]
+       bilinkers dump [seconds]
        bilinkers attach | open-row \"<row title>\" | eval-frame \"<script>\" | ui-demo <rune flags>
        bilinkers --version
 Bilinkers is made by TX25-2.
@@ -27,6 +28,8 @@ island, run on the Beelingua home, checks B1.1 to C2.2 and runs each unfinished 
 final-test always runs in the terminal.
 final-test is read-only unless FINAL_TEST_AUTO_ANSWER=1 or FINAL_TEST_GUESS_LISTENING=1
 (FINAL_TEST_CONFIDENCE_THRESHOLD, FINAL_TEST_REVIEWS_REQUIRED). It never clicks Submit.";
+
+const DUMP_SECONDS: u64 = 20;
 
 const DEFAULT_URL: &str = "https://lms.binus.ac.id";
 
@@ -46,6 +49,10 @@ enum Mode {
     EvalFrame {
         script: String,
     },
+    /// Saves the open page's HTML, its iframes and its XHR replies for `seconds` to a json file.
+    Dump {
+        seconds: u64,
+    },
     /// Prints the version and the credit.
     Version,
     /// Dev: render the dashboard headless from a fixed run, passing the rest to Rune.
@@ -61,6 +68,11 @@ fn parse_args(args: &[String]) -> Result<Mode, String> {
         Some("attach") => Ok(Mode::Attach),
         Some("open-row") => second.map(|title| Mode::OpenRow { title }).ok_or_else(|| USAGE.to_string()),
         Some("eval-frame") => second.map(|script| Mode::EvalFrame { script }).ok_or_else(|| USAGE.to_string()),
+        Some("dump") => match second.as_deref().map(str::parse) {
+            None => Ok(Mode::Dump { seconds: DUMP_SECONDS }),
+            Some(Ok(seconds)) => Ok(Mode::Dump { seconds }),
+            Some(Err(_)) => Err(USAGE.to_string()),
+        },
         Some("ui-demo") => Ok(Mode::UiDemo { rune_args: args[1..].to_vec() }),
         Some("-h" | "--help" | "help") => Err(USAGE.to_string()),
         Some("-V" | "--version") => Ok(Mode::Version),
@@ -104,6 +116,28 @@ async fn open_row(lms: &Lms, title: &str) -> Result<(), String> {
         lms.sleep(1500).await;
     }
     Ok(())
+}
+
+/// Snapshot, record the network while the user clicks, snapshot again, write one json file.
+async fn dump(lms: &Lms, seconds: u64) -> Result<String, String> {
+    let err = |e: bilinkers::browser::PageError| e.to_string();
+    let before = bilinkers::dump::snapshot(lms).await.map_err(err)?;
+    let (responses, after) = if seconds == 0 {
+        (Vec::new(), None)
+    } else {
+        println!("Recording for {seconds} s. Click Check, Skip or the next question now so its data loads.");
+        let responses = bilinkers::dump::record_responses(&lms.browser, &lms.page, Duration::from_secs(seconds))
+            .await
+            .map_err(err)?;
+        (responses, Some(bilinkers::dump::snapshot(lms).await.map_err(err)?))
+    };
+    let captured_at_unix =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or_default();
+    let dump = bilinkers::dump::Dump { captured_at_unix, before, after, responses };
+    let path = format!("bilinkers-dump-{captured_at_unix}.json");
+    let json = serde_json::to_string_pretty(&dump).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| format!("Could not write {path}: {e}"))?;
+    Ok(path)
 }
 
 fn fail(message: &str) -> ! {
@@ -162,6 +196,15 @@ async fn prepare(mode: Mode, env: &HashMap<String, String>, port: u16) -> Option
             match lms.execute_in_frame(&script, &[]).await {
                 Ok(value) => println!("{value}"),
                 Err(e) => fail(&e.to_string()),
+            }
+            return None;
+        }
+        Mode::Dump { seconds } => {
+            match dump(&lms, seconds).await {
+                Ok(path) => println!(
+                    "Saved {path}. It can hold your name and session data, so share it only with people you trust."
+                ),
+                Err(e) => fail(&e),
             }
             return None;
         }
@@ -440,6 +483,9 @@ mod tests {
             parse_args(&args(&["ui-demo", "--snap", "a.png"])),
             Ok(Mode::UiDemo { rune_args: args(&["--snap", "a.png"]) })
         );
+        assert_eq!(parse_args(&args(&["dump"])), Ok(Mode::Dump { seconds: 20 }));
+        assert_eq!(parse_args(&args(&["dump", "0"])), Ok(Mode::Dump { seconds: 0 }));
+        assert!(parse_args(&args(&["dump", "soon"])).is_err());
         assert_eq!(parse_args(&args(&["--version"])), Ok(Mode::Version));
         assert_eq!(VERSION, format!("bilinkers {}, made by TX25-2", env!("CARGO_PKG_VERSION")));
         assert!(USAGE.contains("Bilinkers is made by TX25-2."));

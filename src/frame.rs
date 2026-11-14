@@ -44,13 +44,13 @@ const IFRAME_ORIGIN: &str = r#"
 /// Non-flattened sessions still accept it, and chromiumoxide can only send on its own sessions.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SendMessageToTarget {
-    session_id: SessionId,
-    message: String,
+pub(crate) struct SendMessageToTarget {
+    pub session_id: SessionId,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct Empty {}
+pub(crate) struct Empty {}
 
 impl Method for SendMessageToTarget {
     fn identifier(&self) -> chromiumoxide::types::MethodId {
@@ -62,11 +62,13 @@ impl Command for SendMessageToTarget {
     type Response = Empty;
 }
 
-struct Session {
-    target: TargetId,
-    id: SessionId,
-    messages: EventStream<EventReceivedMessageFromTarget>,
-    detaches: EventStream<EventDetachedFromTarget>,
+/// A non-flattened session: its replies and events arrive as raw JSON strings, so a CDP field
+/// newer than chromiumoxide's generated types cannot make a message unreadable.
+pub(crate) struct Session {
+    pub target: TargetId,
+    pub id: SessionId,
+    pub messages: EventStream<EventReceivedMessageFromTarget>,
+    pub detaches: EventStream<EventDetachedFromTarget>,
 }
 
 /// Why an evaluate in the iframe failed.
@@ -195,7 +197,7 @@ async fn frame_target(browser: &Browser, page: &Page, index: usize) -> PageResul
     }
 }
 
-async fn attach(browser: &Browser, target: TargetId) -> PageResult<Session> {
+pub(crate) async fn attach(browser: &Browser, target: TargetId) -> PageResult<Session> {
     // Subscribe first so no reply can arrive before the stream exists.
     let messages = browser.event_listener::<EventReceivedMessageFromTarget>().await?;
     let detaches = browser.event_listener::<EventDetachedFromTarget>().await?;

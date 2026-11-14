@@ -3,6 +3,7 @@ pub mod browser;
 pub mod config;
 pub mod detect;
 pub mod devtools;
+pub mod dump;
 pub mod final_test;
 pub mod frame;
 pub mod grouped_reading;

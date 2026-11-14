@@ -81,6 +81,7 @@ cargo run --release -- [--no-ui] [mode] [url]
 | `attach` | Checks that Bilinkers can see your LMS tab. Changes nothing. |
 | `open-row "<row title>"` | Opens one activity row by its title. |
 | `eval-frame "<script>"` | Runs JavaScript in the activity frame and prints the result. Useful for debugging selectors. |
+| `dump [seconds]` | Saves the open page's HTML, every iframe's HTML, and the XHR and fetch replies seen in the next `seconds` (default 20, `0` skips recording) to `bilinkers-dump-<time>.json`. Click Check, Skip or the next question while it records. Read-only. The file can hold your name and session data. |
 | `ui-demo --snap out.png` | Renders the window from sample events into an image, without a browser. |
 
 ## Project layout
