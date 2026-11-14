@@ -158,15 +158,33 @@ pub async fn answer<P: FramedPage>(driver: &Scoped<'_, P>, llm_result: &Value) -
     Ok(())
 }
 
-/// Only a visible .quiz-next-btn (or no radios left) is trusted. The banners are unreliable.
-pub async fn check_result<D: Driver>(driver: &D) -> Result<Check, String> {
-    let poll = r#"
+const CHECK_STATE: &str = r#"
       const nextBtn = document.querySelector('.quiz-next-btn');
-      if (nextBtn && getComputedStyle(nextBtn).display !== 'none') return true;
-      return document.querySelectorAll('.quiz-input-radio').length === 0;
+      if (nextBtn && getComputedStyle(nextBtn).display !== 'none') return 'correct';
+      const inputs = document.querySelectorAll('.quiz-input-radio');
+      if (inputs.length === 0) return 'correct';
+      return [...inputs].every((i) => i.disabled) ? 'locked' : null;
     "#;
-    let outcome = poll_with_submit_retry(driver, Duration::from_secs(5), poll, |v| {
-        (*v == json!(true)).then_some(Outcome::Correct)
+
+/// The radios can lock a moment before .quiz-next-btn shows on a correct answer.
+pub const LOCKED_GRACE: Duration = Duration::from_millis(1500);
+
+/// Only a visible .quiz-next-btn (or no radios left) means correct. The banners are unreliable.
+/// Radios that stay locked with no next button mean the graded answer was wrong, which saves
+/// waiting out the whole timeout.
+pub async fn check_result<D: Driver>(driver: &D) -> Result<Check, String> {
+    let locked_since = std::cell::Cell::new(None::<Instant>);
+    let outcome = poll_with_submit_retry(driver, Duration::from_secs(5), CHECK_STATE, |v| match v.as_str() {
+        Some("correct") => Some(Outcome::Correct),
+        Some("locked") => {
+            let since = locked_since.get().unwrap_or_else(Instant::now);
+            locked_since.set(Some(since));
+            (since.elapsed() >= LOCKED_GRACE).then_some(Outcome::Incorrect)
+        }
+        _ => {
+            locked_since.set(None);
+            None
+        }
     })
     .await
     .map_err(|e| e.0)?;
@@ -364,7 +382,39 @@ mod tests {
         let mut calls = 0;
         let page = FakePage::new(|_: Scope, code: &str, _: &[Value]| -> PageResult<Value> {
             calls += 1;
-            Ok(if code.contains("quiz-next-btn") { json!(calls >= 3) } else { Value::Null })
+            Ok(if code.contains("quiz-next-btn") && calls >= 3 { json!("correct") } else { Value::Null })
+        });
+        assert_eq!(check_result(&page).await, Ok(Check::new(Outcome::Correct)));
+    }
+
+    #[tokio::test]
+    async fn check_result_reports_incorrect_once_the_radios_stay_locked_without_waiting_for_the_submit_retry() {
+        let mut submit_clicks = 0;
+        let page = FakePage::new(|_: Scope, code: &str, _: &[Value]| -> PageResult<Value> {
+            if code.contains("quiz-next-btn") {
+                return Ok(json!("locked"));
+            }
+            if code.contains("quiz-submit-btn") {
+                submit_clicks += 1;
+            }
+            Ok(Value::Null)
+        });
+        let started = Instant::now();
+        assert_eq!(check_result(&page).await, Ok(Check::new(Outcome::Incorrect)));
+        assert!(started.elapsed() < Duration::from_millis(2500), "took {:?}", started.elapsed());
+        drop(page);
+        assert_eq!(submit_clicks, 0);
+    }
+
+    // Radios lock a moment before the next button shows on a correct answer.
+    #[tokio::test]
+    async fn check_result_stays_correct_when_the_next_button_shows_within_the_locked_grace() {
+        let started = Instant::now();
+        let page = FakePage::new(|_: Scope, code: &str, _: &[Value]| -> PageResult<Value> {
+            if !code.contains("quiz-next-btn") {
+                return Ok(Value::Null);
+            }
+            Ok(json!(if started.elapsed() < Duration::from_millis(800) { "locked" } else { "correct" }))
         });
         assert_eq!(check_result(&page).await, Ok(Check::new(Outcome::Correct)));
     }
